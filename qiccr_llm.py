@@ -523,66 +523,72 @@ class QICCRLLM:
             self.store.write_fp32(new_base + new_in, self.store.read_fp32(old_base + old_in))
          
     def expand_to_stage2(self):
-        if self.stage >= 2: return
-        print("🚀 Expandindo para Estágio 2 (Growth: Width & Depth)...")
-        
-        old_d, new_d = Config.S1_D_MODEL, Config.S2_D_MODEL
-        old_df, new_df = Config.S1_D_FF, Config.S2_D_FF
-        
-        # 1. Backup de referências
-        old_tok_off = self.tok_off
-        old_layers = self.layers[:]
-        old_ln_off = self.ln_off
+    if self.stage >= 2: return
+    print("🚀 Expandindo para Estágio 2 (Growth: Width & Depth)...")
+    
+    old_d, new_d = Config.S1_D_MODEL, Config.S2_D_MODEL
+    old_df, new_df = Config.S1_D_FF, Config.S2_D_FF
+    old_layers = self.layers[:]
+    old_ln_off = self.ln_off
 
-        # 2. Re-alocação lógica (O WeightStore continua o mesmo)
-        self.alloc = WeightAllocator(self.store.total_params)
-        self.tok_off = self.alloc.alloc(Config.VOCAB_SIZE * new_d, "tok_embed")
-        
-        # 3. Interpolação correta do Embedding
-        # Diferente de matrizes lineares, o embedding é [Vocab x Dim] sem bias por linha
-        for i in range(Config.VOCAB_SIZE):
-            for j in range(min(old_d, new_d)):
-                val = self.store.read_fp32(old_tok_off + i * old_d + j)
-                self.store.write_fp32(self.tok_off + i * new_d + j, val)
+    old_tok = [[self.store.read_fp32(self.tok_off+i*old_d+j) for j in range(old_d)] for i in range(Config.VOCAB_SIZE)]
+    old_ln_g = [self.store.read_fp32(old_ln_off+j) for j in range(old_d)]
+    old_ln_b = [self.store.read_fp32(old_ln_off+old_d+j) for j in range(old_d)]
+    old_layer_weights = []
+    for blk in old_layers:
+        pw = {}
+        for name,proj in [('q',blk.q_proj),('k',blk.k_proj),('v',blk.v_proj),('o',blk.o_proj),('up',blk.ff_up),('dn',blk.ff_down)]:
+            pw[name] = [[self.store.read_fp32(proj.offset+i*(proj.in_f+1)+j) for j in range(proj.in_f+1)] for i in range(proj.out_f)]
+        for name,ln in [('ln1',blk.ln1),('ln2',blk.ln2)]:
+            pw[name+'_g'] = [self.store.read_fp32(ln.offset+j) for j in range(old_d)]
+            pw[name+'_b'] = [self.store.read_fp32(ln.offset+old_d+j) for j in range(old_d)]
+        old_layer_weights.append(pw)
 
-        # 4. Construção das novas camadas
-        self.layers = []
-        for i in range(Config.S2_N_LAYERS):
-            blk = TransformerBlock(i, self.alloc, self.store, new_d, Config.S2_N_HEADS, new_df, True)
-            self.layers.append(blk)
+    self.alloc = WeightAllocator(self.store.total_params)
+    self.tok_off = self.alloc.alloc(Config.VOCAB_SIZE * new_d, "tok_embed")
 
-        # 5. Width Growth (Camada 0 antiga -> Camada 0 nova)
-        o_blk, n_blk = old_layers[0], self.layers[0]
-        projs = [(o_blk.q_proj, n_blk.q_proj), (o_blk.k_proj, n_blk.k_proj), 
-                 (o_blk.v_proj, n_blk.v_proj), (o_blk.o_proj, n_blk.o_proj),
-                 (o_blk.ff_up, n_blk.ff_up), (o_blk.ff_down, n_blk.ff_down)]
-        
-        for op, np in projs:
-            self._interpolate_weights(op.offset, np.offset, op.in_f, op.out_f, np.in_f, np.out_f)
-            
-        # 6. Depth Stacking (Se subimos de 1 para 2 camadas, a L1 recebe pesos da L0 expandida)
-        if len(self.layers) > 1:
-            l0, l1 = self.layers[0], self.layers[1]
-            # Copiar bytes brutos da L0 expandida para a L1
-            for p0, p1 in [(l0.q_proj, l1.q_proj), (l0.k_proj, l1.k_proj), (l0.v_proj, l1.v_proj),
-                           (l0.o_proj, l1.o_proj), (l0.ff_up, l1.ff_up), (l0.ff_down, l1.ff_down)]:
-                for k in range(p0.W_size):
-                    self.store.write_fp32(p1.offset + k, self.store.read_fp32(p0.offset + k))
+    for i in range(Config.VOCAB_SIZE):
+        for j in range(new_d):
+            self.store.write_fp32(self.tok_off+i*new_d+j, old_tok[i][j] if j < old_d else 0.0)
 
-        # 7. Finalização
-        self.ln_off = self.alloc.alloc(2 * new_d, "ln_final")
-        self.ln = LayerNorm(new_d, self.ln_off, "ln_final", True)
-        self.ls_off = self.alloc.alloc(1, "logit_scale")
-        self.store.write_fp32(self.ls_off, 1.0 / math.sqrt(new_d))
-        
-        # Reset do Cache para novas dimensões
-        self.d_model = new_d
-        self.kv = KVCache(Config.S2_N_LAYERS, Config.S2_N_HEADS, new_d // Config.S2_N_HEADS, Config.KV_MAX_SEQ)
-        self.stage = 2
-        
-        # Resetar momentos do Adam apenas para os parâmetros que mudaram drasticamente
-        self.opt = AdamOptimizer(self.store.total_params) 
-        print("✅ Expansão concluída.")
+    self.layers = []
+    for i in range(Config.S2_N_LAYERS):
+        blk = TransformerBlock(i, self.alloc, self.store, new_d, Config.S2_N_HEADS, new_df, True)
+        self.layers.append(blk)
+
+    src = old_layer_weights[0]
+    for li in range(min(Config.S2_N_LAYERS, 2)):
+        blk = self.layers[li]
+        for name,proj in [('q',blk.q_proj),('k',blk.k_proj),('v',blk.v_proj),('o',blk.o_proj),('up',blk.ff_up),('dn',blk.ff_down)]:
+            for i in range(proj.out_f):
+                old_row = src[name][i] if i < len(src[name]) else None
+                for j in range(proj.in_f):
+                    val = old_row[j] if old_row and j < len(old_row)-1 else 0.0
+                    self.store.write_fp32(proj.offset+i*(proj.in_f+1)+j, val)
+                bias = old_row[len(old_row)-1] if old_row else 0.0
+                self.store.write_fp32(proj.offset+i*(proj.in_f+1)+proj.in_f, bias)
+        for lname,ln in [('ln1',blk.ln1),('ln2',blk.ln2)]:
+            for j in range(new_d):
+                self.store.write_fp32(ln.offset+j, src[lname+'_g'][j] if j < old_d else 1.0)
+                self.store.write_fp32(ln.offset+new_d+j, src[lname+'_b'][j] if j < old_d else 0.0)
+
+    self.ln_off = self.alloc.alloc(2*new_d, "ln_final")
+    self.ln = LayerNorm(new_d, self.ln_off, "ln_final", True)
+    for j in range(new_d):
+        self.store.write_fp32(self.ln_off+j, old_ln_g[j] if j < old_d else 1.0)
+        self.store.write_fp32(self.ln_off+new_d+j, old_ln_b[j] if j < old_d else 0.0)
+
+    self.ls_off = self.alloc.alloc(1, "logit_scale")
+    self.store.write_fp32(self.ls_off, 1.0/math.sqrt(new_d))
+
+    self.d_model = new_d
+    self.n_heads = Config.S2_N_HEADS
+    self.n_layers = Config.S2_N_LAYERS
+    self.d_ff = new_df
+    self.kv = KVCache(Config.S2_N_LAYERS, Config.S2_N_HEADS, new_d//Config.S2_N_HEADS, Config.KV_MAX_SEQ)
+    self.stage = 2
+    self.opt = AdamOptimizer(self.store.total_params)
+    print("✅ Expansão concluída.")
     
     def _forward(self,tokens,use_kv=False,positions=None,training=False):
         d=self.d_model; seq=tokens
