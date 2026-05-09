@@ -610,43 +610,45 @@ class QICCRLLM:
         self.gpos+=1; return logits
     
     def train_step(self,contexts,targets):
-        d=self.d_model; bs=len(contexts); total_loss=0.0
-        for ctx,tgt in zip(contexts,targets):
-            seq=ctx[-Config.MAX_SEQ:]; sl=len(seq); pos=list(range(sl))
-            x=[self.store.read_vector_fp32(self.tok_off+tid*d,d) for tid in seq]; cl=[]
-            for layer in self.layers: x,c=layer.forward(x,self.store,kv_cache=None,positions=pos,training=True); cl.append(c)
-            final,lnc=self.ln.forward(x[-1],self.store)
-            ls=max(Config.LOGIT_SCALE_MIN,min(Config.LOGIT_SCALE_MAX,self.store.read_fp32(self.ls_off)))
-            logits=array.array('f',[ls*sum(self.store.read_fp32(self.tok_off+t*d+j)*final[j] for j in range(d)) for t in range(Config.VOCAB_SIZE)])
-            probs=safe_softmax(logits)
-            smooth,V=Config.LABEL_SMOOTHING,Config.VOCAB_SIZE
-            td=array.array('f',[smooth/V]*V); td[tgt]=(1.0-smooth)+smooth/V
-            loss=-sum(td[i]*math.log(max(probs[i],1e-9)) for i in range(V))
-            norm=1.0/bs; gl=array.array('f',[(probs[i]-td[i])*norm for i in range(V)])
-            gf=array.array('f',[0.0]*d)
-            for t in range(V):
-                g=gl[t]
-                for j in range(d): gf[j]+=self.store.read_fp32(self.tok_off+t*d+j)*g*ls; self.grads[self.tok_off+t*d+j]+=final[j]*g*ls
-            self.grads[self.ls_off]+=sum(gl[t]*sum(self.store.read_fp32(self.tok_off+t*d+j)*final[j] for j in range(d)) for t in range(V))
-            gln=self.ln.backward(gf,lnc,self.store,self.grads)
-            glist=[array.array('f',[0.0]*d) for _ in range(sl)]; glist[-1]=gln
-            for idx in range(len(self.layers)-1,-1,-1): glist=self.layers[idx].backward(glist,cl[idx],self.store,self.grads)
-            en=norm/max(1,sl)
-            for pi,tid in enumerate(seq):
-                base=self.tok_off+tid*d
-                for j in range(d): self.grads[base+j]+=glist[pi][j]*en
-            total_loss+=loss
-        avg_loss=total_loss/bs
-        trainable=[(self.tok_off,Config.VOCAB_SIZE*d),(self.ln_off,2*d),(self.ls_off,1)]
-        for layer in self.layers:
-            for proj in [layer.q_proj,layer.k_proj,layer.v_proj,layer.o_proj,layer.ff_up,layer.ff_down]:
-                trainable.append((proj.offset,proj.W_size))
-            trainable.append((layer.ln1.offset,2*d)); trainable.append((layer.ln2.offset,2*d))
-        if self.step%100==0:
-            gn=math.sqrt(sum(self.grads[off+i]**2 for off,sz in trainable for i in range(sz)))
-            print(f"   [GradNorm] step {self.step}: {gn:.4f} | LR: {self._noam_lr(max(1,self.step)):.8f}")
-        self.opt.step(self.store.fp32,self.grads,trainable,self._noam_lr(max(1,self.step)),Config.WEIGHT_DECAY,Config.GRAD_CLIP)
-        self.step+=1; return avg_loss
+    d=self.d_model; bs=len(contexts); total_loss=0.0
+    for ctx,tgt in zip(contexts,targets):
+        seq=ctx[-Config.MAX_SEQ:]; sl=len(seq); pos=list(range(sl))
+        x=[self.store.read_vector_fp32(self.tok_off+tid*d,d) for tid in seq]; cl=[]
+        for layer in self.layers: x,c=layer.forward(x,self.store,kv_cache=None,positions=pos,training=True); cl.append(c)
+        final,lnc=self.ln.forward(x[-1],self.store)
+        final_saved=array.array('f',final)
+        ls=max(Config.LOGIT_SCALE_MIN,min(Config.LOGIT_SCALE_MAX,self.store.read_fp32(self.ls_off)))
+        raw_logits=array.array('f',[sum(self.store.read_fp32(self.tok_off+t*d+j)*final_saved[j] for j in range(d)) for t in range(Config.VOCAB_SIZE)])
+        logits=array.array('f',[ls*raw_logits[t] for t in range(Config.VOCAB_SIZE)])
+        probs=safe_softmax(logits)
+        smooth,V=Config.LABEL_SMOOTHING,Config.VOCAB_SIZE
+        td=array.array('f',[smooth/V]*V); td[tgt]=(1.0-smooth)+smooth/V
+        loss=-sum(td[i]*math.log(max(probs[i],1e-9)) for i in range(V))
+        norm=1.0/bs; gl=array.array('f',[(probs[i]-td[i])*norm for i in range(V)])
+        self.grads[self.ls_off]+=sum(gl[t]*raw_logits[t] for t in range(V))
+        gf=array.array('f',[0.0]*d)
+        for t in range(V):
+            g=gl[t]
+            for j in range(d): gf[j]+=self.store.read_fp32(self.tok_off+t*d+j)*g*ls; self.grads[self.tok_off+t*d+j]+=final_saved[j]*g*ls
+        gln=self.ln.backward(gf,lnc,self.store,self.grads)
+        glist=[array.array('f',[0.0]*d) for _ in range(sl)]; glist[-1]=gln
+        for idx in range(len(self.layers)-1,-1,-1): glist=self.layers[idx].backward(glist,cl[idx],self.store,self.grads)
+        en=norm/max(1,sl)
+        for pi,tid in enumerate(seq):
+            base=self.tok_off+tid*d
+            for j in range(d): self.grads[base+j]+=glist[pi][j]*en
+        total_loss+=loss
+    avg_loss=total_loss/bs
+    trainable=[(self.tok_off,Config.VOCAB_SIZE*d),(self.ln_off,2*d),(self.ls_off,1)]
+    for layer in self.layers:
+        for proj in [layer.q_proj,layer.k_proj,layer.v_proj,layer.o_proj,layer.ff_up,layer.ff_down]:
+            trainable.append((proj.offset,proj.W_size))
+        trainable.append((layer.ln1.offset,2*d)); trainable.append((layer.ln2.offset,2*d))
+    if self.step%100==0:
+        gn=math.sqrt(sum(self.grads[off+i]**2 for off,sz in trainable for i in range(sz)))
+        print(f"   [GradNorm] step {self.step}: {gn:.4f} | LR: {self._noam_lr(max(1,self.step)):.8f}")
+    self.opt.step(self.store.fp32,self.grads,trainable,self._noam_lr(max(1,self.step)),Config.WEIGHT_DECAY,Config.GRAD_CLIP)
+    self.step+=1; return avg_loss
     
     def generate_beam(self,prompt,max_new=80,temp=0.7,bw=None):
     if bw is None: bw=Config.BEAM_WIDTH
