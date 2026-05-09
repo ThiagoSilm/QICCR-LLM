@@ -1,5 +1,14 @@
 """
-QICCR-LLM
+QICCR-LLM v7.0 — Staged Training com Model Growth (CÓDIGO COMPLETO)
+=====================================================================
+Estratégia:
+- Estágio 1: 1 camada, d_model=64, 2 cabeças, d_ff=128 (2000 passos)
+- Estágio 2: Expansão para 2 camadas, d_model=128, 4 cabeças, d_ff=256 (4000 passos)
+  * Depth-stacking: duplica camada 1 → camada 2
+  * Width growth: interpola pesos para novo d_model
+- Estágio 3: Fine-tuning completo (2000 passos)
+
+Baseado em Shen et al. (2022), Du et al. (2024), Yano et al. (2025).
 """
 
 import math, random, os, sys, array, json, gzip, heapq
@@ -345,50 +354,45 @@ class TransformerBlock:
         return x, caches
     
     def backward(self, grad_output_list, caches, store, grads):
-    if not self.trainable or not caches: return [array.array('f',[0.0]*self.d_model) for _ in grad_output_list]
-    c=caches; seq_len=len(grad_output_list); d_model=self.d_model; d_head=self.d_head
-    n_heads=self.n_heads; scale=math.sqrt(d_head); positions=c['positions']
-    
-    gd=[self.ff_down.backward(grad_output_list[i],c['down_caches'][i],c['down_masks'][i],store,grads) for i in range(seq_len)]
-    gpost=[array.array('f',[gd[i][k]*gelu_derivative_arr(c['pre_gelu'][i])[k] for k in range(len(gd[i]))]) for i in range(seq_len)]
-    gu=[self.ff_up.backward(gpost[i],c['up_caches'][i],c['up_masks'][i],store,grads) for i in range(seq_len)]
-    gl2=[self.ln2.backward(gu[i],c['ln2_caches'][i],store,grads) for i in range(seq_len)]
-    grad_res2=[array.array('f',[grad_output_list[i][j]+gl2[i][j] for j in range(d_model)]) for i in range(seq_len)]
-    
-    go=[self.o_proj.backward(grad_res2[i],c['o_caches'][i],c['o_masks'][i],store,grads) for i in range(seq_len)]
-    gQ=[array.array('f',[0.0]*d_model) for _ in range(seq_len)]
-    gK=[array.array('f',[0.0]*d_model) for _ in range(seq_len)]
-    gV=[array.array('f',[0.0]*d_model) for _ in range(seq_len)]
-    for h in range(n_heads):
-        s,e=h*d_head,(h+1)*d_head; Vh=c['V_heads'][h]; ph=c['all_probs'][h]; mh=c['causal_mask'][h]
-        Kh_h=c['K_heads'][h]; Qh_h=c['Q_heads'][h]; total_len=len(Vh)
-        for i in range(seq_len):
-            gh=array.array('f',[go[i][s+k] for k in range(d_head)]); probs=ph[i]; mi=mh[i]
-            gp=[0.0]*total_len
-            for j in range(total_len):
-                if mi[j]:
-                    acc=0.0
-                    for k in range(d_head): acc+=float(gh[k])*float(Vh[j][k])
-                    gp[j]=acc
-            gs=softmax_backward(probs,mi,gp,scale)
-            for j in range(total_len):
-                if not mi[j] or abs(gs[j])<1e-30: continue
-                Kh_j=Kh_h[j]; Qh_i=Qh_h[i]
-                for k in range(d_head): gQ[i][s+k]+=gs[j]*float(Kh_j[k]); gK[j][s+k]+=gs[j]*float(Qh_i[k])
-            for j in range(total_len):
-                if not mi[j]: continue
-                p=float(probs[j])
-                if p<=0: continue
-                for k in range(d_head): gV[j][s+k]+=p*float(gh[k])
-    
-    for i in range(seq_len): gQ[i]=self.rope.inverse_rotate(gQ[i],positions[i])
-    for j in range(seq_len): gK[j]=self.rope.inverse_rotate(gK[j],positions[j])
-    gq=[self.q_proj.backward(gQ[i],c['q_caches'][i],c['q_masks'][i],store,grads) for i in range(seq_len)]
-    gk=[self.k_proj.backward(gK[i],c['k_caches'][i],c['k_masks'][i],store,grads) for i in range(seq_len)]
-    gv=[self.v_proj.backward(gV[i],c['v_caches'][i],c['v_masks'][i],store,grads) for i in range(seq_len)]
-    grad_attn=[array.array('f',[gq[i][j]+gk[i][j]+gv[i][j] for j in range(d_model)]) for i in range(seq_len)]
-    gl1=[self.ln1.backward(grad_attn[i],c['ln1_caches'][i],store,grads) for i in range(seq_len)]
-    return [array.array('f',[grad_res2[i][j]+gl1[i][j] for j in range(d_model)]) for i in range(seq_len)]
+        if not self.trainable or not caches: return [array.array('f',[0.0]*self.d_model) for _ in grad_output_list]
+        c=caches; seq_len=len(grad_output_list); d_model=self.d_model; d_head=self.d_head
+        n_heads=self.n_heads; scale=math.sqrt(d_head); positions=c['positions']
+        gd=[self.ff_down.backward(array.array('f',[grad_output_list[i][j] for j in range(d_model)]),c['down_caches'][i],c['down_masks'][i],store,grads) for i in range(seq_len)]
+        gpost=[array.array('f',[gd[i][k]*gelu_derivative_arr(c['pre_gelu'][i])[k] for k in range(len(gd[i]))]) for i in range(seq_len)]
+        gu=[self.ff_up.backward(gpost[i],c['up_caches'][i],c['up_masks'][i],store,grads) for i in range(seq_len)]
+        gl2=[self.ln2.backward(array.array('f',[gu[i][j]+grad_output_list[i][j] for j in range(d_model)]),c['ln2_caches'][i],store,grads) for i in range(seq_len)]
+        go=[self.o_proj.backward(array.array('f',[gl2[i][j]+grad_output_list[i][j] for j in range(d_model)]),c['o_caches'][i],c['o_masks'][i],store,grads) for i in range(seq_len)]
+        gQ=[array.array('f',[0.0]*d_model) for _ in range(seq_len)]
+        gK=[array.array('f',[0.0]*d_model) for _ in range(seq_len)]
+        gV=[array.array('f',[0.0]*d_model) for _ in range(seq_len)]
+        for h in range(n_heads):
+            s,e=h*d_head,(h+1)*d_head; Vh=c['V_heads'][h]; ph=c['all_probs'][h]; mh=c['causal_mask'][h]
+            Kh_h=c['K_heads'][h]; Qh_h=c['Q_heads'][h]; total_len=len(Vh)
+            for i in range(seq_len):
+                gh=array.array('f',[go[i][s+k] for k in range(d_head)]); probs=ph[i]; mi=mh[i]
+                gp=[0.0]*total_len
+                for j in range(total_len):
+                    if mi[j]:
+                        acc=0.0
+                        for k in range(d_head): acc+=float(gh[k])*float(Vh[j][k])
+                        gp[j]=acc
+                gs=softmax_backward(probs,mi,gp,scale)
+                for j in range(total_len):
+                    if not mi[j] or abs(gs[j])<1e-30: continue
+                    Kh_j=Kh_h[j]; Qh_i=Qh_h[i]
+                    for k in range(d_head): gQ[i][s+k]+=gs[j]*float(Kh_j[k]); gK[j][s+k]+=gs[j]*float(Qh_i[k])
+                for j in range(total_len):
+                    if not mi[j]: continue
+                    p=float(probs[j])
+                    if p<=0: continue
+                    for k in range(d_head): gV[j][s+k]+=p*float(gh[k])
+        for i in range(seq_len): gQ[i]=self.rope.inverse_rotate(gQ[i],positions[i])
+        for j in range(seq_len): gK[j]=self.rope.inverse_rotate(gK[j],positions[j])
+        gq=[self.q_proj.backward(gQ[i],c['q_caches'][i],c['q_masks'][i],store,grads) for i in range(seq_len)]
+        gk=[self.k_proj.backward(gK[i],c['k_caches'][i],c['k_masks'][i],store,grads) for i in range(seq_len)]
+        gv=[self.v_proj.backward(gV[i],c['v_caches'][i],c['v_masks'][i],store,grads) for i in range(seq_len)]
+        gl1=[self.ln1.backward(array.array('f',[gq[i][j]+gk[i][j]+gv[i][j] for j in range(d_model)]),c['ln1_caches'][i],store,grads) for i in range(seq_len)]
+        return gl1
 
 # ====================================================================
 # TOKENIZER
@@ -523,72 +527,66 @@ class QICCRLLM:
             self.store.write_fp32(new_base + new_in, self.store.read_fp32(old_base + old_in))
          
     def expand_to_stage2(self):
-    if self.stage >= 2: return
-    print("🚀 Expandindo para Estágio 2 (Growth: Width & Depth)...")
-    
-    old_d, new_d = Config.S1_D_MODEL, Config.S2_D_MODEL
-    old_df, new_df = Config.S1_D_FF, Config.S2_D_FF
-    old_layers = self.layers[:]
-    old_ln_off = self.ln_off
+        if self.stage >= 2: return
+        print("🚀 Expandindo para Estágio 2 (Growth: Width & Depth)...")
+        
+        old_d, new_d = Config.S1_D_MODEL, Config.S2_D_MODEL
+        old_df, new_df = Config.S1_D_FF, Config.S2_D_FF
+        
+        # 1. Backup de referências
+        old_tok_off = self.tok_off
+        old_layers = self.layers[:]
+        old_ln_off = self.ln_off
 
-    old_tok = [[self.store.read_fp32(self.tok_off+i*old_d+j) for j in range(old_d)] for i in range(Config.VOCAB_SIZE)]
-    old_ln_g = [self.store.read_fp32(old_ln_off+j) for j in range(old_d)]
-    old_ln_b = [self.store.read_fp32(old_ln_off+old_d+j) for j in range(old_d)]
-    old_layer_weights = []
-    for blk in old_layers:
-        pw = {}
-        for name,proj in [('q',blk.q_proj),('k',blk.k_proj),('v',blk.v_proj),('o',blk.o_proj),('up',blk.ff_up),('dn',blk.ff_down)]:
-            pw[name] = [[self.store.read_fp32(proj.offset+i*(proj.in_f+1)+j) for j in range(proj.in_f+1)] for i in range(proj.out_f)]
-        for name,ln in [('ln1',blk.ln1),('ln2',blk.ln2)]:
-            pw[name+'_g'] = [self.store.read_fp32(ln.offset+j) for j in range(old_d)]
-            pw[name+'_b'] = [self.store.read_fp32(ln.offset+old_d+j) for j in range(old_d)]
-        old_layer_weights.append(pw)
+        # 2. Re-alocação lógica (O WeightStore continua o mesmo)
+        self.alloc = WeightAllocator(self.store.total_params)
+        self.tok_off = self.alloc.alloc(Config.VOCAB_SIZE * new_d, "tok_embed")
+        
+        # 3. Interpolação correta do Embedding
+        # Diferente de matrizes lineares, o embedding é [Vocab x Dim] sem bias por linha
+        for i in range(Config.VOCAB_SIZE):
+            for j in range(min(old_d, new_d)):
+                val = self.store.read_fp32(old_tok_off + i * old_d + j)
+                self.store.write_fp32(self.tok_off + i * new_d + j, val)
 
-    self.alloc = WeightAllocator(self.store.total_params)
-    self.tok_off = self.alloc.alloc(Config.VOCAB_SIZE * new_d, "tok_embed")
+        # 4. Construção das novas camadas
+        self.layers = []
+        for i in range(Config.S2_N_LAYERS):
+            blk = TransformerBlock(i, self.alloc, self.store, new_d, Config.S2_N_HEADS, new_df, True)
+            self.layers.append(blk)
 
-    for i in range(Config.VOCAB_SIZE):
-        for j in range(new_d):
-            self.store.write_fp32(self.tok_off+i*new_d+j, old_tok[i][j] if j < old_d else 0.0)
+        # 5. Width Growth (Camada 0 antiga -> Camada 0 nova)
+        o_blk, n_blk = old_layers[0], self.layers[0]
+        projs = [(o_blk.q_proj, n_blk.q_proj), (o_blk.k_proj, n_blk.k_proj), 
+                 (o_blk.v_proj, n_blk.v_proj), (o_blk.o_proj, n_blk.o_proj),
+                 (o_blk.ff_up, n_blk.ff_up), (o_blk.ff_down, n_blk.ff_down)]
+        
+        for op, np in projs:
+            self._interpolate_weights(op.offset, np.offset, op.in_f, op.out_f, np.in_f, np.out_f)
+            
+        # 6. Depth Stacking (Se subimos de 1 para 2 camadas, a L1 recebe pesos da L0 expandida)
+        if len(self.layers) > 1:
+            l0, l1 = self.layers[0], self.layers[1]
+            # Copiar bytes brutos da L0 expandida para a L1
+            for p0, p1 in [(l0.q_proj, l1.q_proj), (l0.k_proj, l1.k_proj), (l0.v_proj, l1.v_proj),
+                           (l0.o_proj, l1.o_proj), (l0.ff_up, l1.ff_up), (l0.ff_down, l1.ff_down)]:
+                for k in range(p0.W_size):
+                    self.store.write_fp32(p1.offset + k, self.store.read_fp32(p0.offset + k))
 
-    self.layers = []
-    for i in range(Config.S2_N_LAYERS):
-        blk = TransformerBlock(i, self.alloc, self.store, new_d, Config.S2_N_HEADS, new_df, True)
-        self.layers.append(blk)
-
-    src = old_layer_weights[0]
-    for li in range(min(Config.S2_N_LAYERS, 2)):
-        blk = self.layers[li]
-        for name,proj in [('q',blk.q_proj),('k',blk.k_proj),('v',blk.v_proj),('o',blk.o_proj),('up',blk.ff_up),('dn',blk.ff_down)]:
-            for i in range(proj.out_f):
-                old_row = src[name][i] if i < len(src[name]) else None
-                for j in range(proj.in_f):
-                    val = old_row[j] if old_row and j < len(old_row)-1 else 0.0
-                    self.store.write_fp32(proj.offset+i*(proj.in_f+1)+j, val)
-                bias = old_row[len(old_row)-1] if old_row else 0.0
-                self.store.write_fp32(proj.offset+i*(proj.in_f+1)+proj.in_f, bias)
-        for lname,ln in [('ln1',blk.ln1),('ln2',blk.ln2)]:
-            for j in range(new_d):
-                self.store.write_fp32(ln.offset+j, src[lname+'_g'][j] if j < old_d else 1.0)
-                self.store.write_fp32(ln.offset+new_d+j, src[lname+'_b'][j] if j < old_d else 0.0)
-
-    self.ln_off = self.alloc.alloc(2*new_d, "ln_final")
-    self.ln = LayerNorm(new_d, self.ln_off, "ln_final", True)
-    for j in range(new_d):
-        self.store.write_fp32(self.ln_off+j, old_ln_g[j] if j < old_d else 1.0)
-        self.store.write_fp32(self.ln_off+new_d+j, old_ln_b[j] if j < old_d else 0.0)
-
-    self.ls_off = self.alloc.alloc(1, "logit_scale")
-    self.store.write_fp32(self.ls_off, 1.0/math.sqrt(new_d))
-
-    self.d_model = new_d
-    self.n_heads = Config.S2_N_HEADS
-    self.n_layers = Config.S2_N_LAYERS
-    self.d_ff = new_df
-    self.kv = KVCache(Config.S2_N_LAYERS, Config.S2_N_HEADS, new_d//Config.S2_N_HEADS, Config.KV_MAX_SEQ)
-    self.stage = 2
-    self.opt = AdamOptimizer(self.store.total_params)
-    print("✅ Expansão concluída.")
+        # 7. Finalização
+        self.ln_off = self.alloc.alloc(2 * new_d, "ln_final")
+        self.ln = LayerNorm(new_d, self.ln_off, "ln_final", True)
+        self.ls_off = self.alloc.alloc(1, "logit_scale")
+        self.store.write_fp32(self.ls_off, 1.0 / math.sqrt(new_d))
+        
+        # Reset do Cache para novas dimensões
+        self.d_model = new_d
+        self.kv = KVCache(Config.S2_N_LAYERS, Config.S2_N_HEADS, new_d // Config.S2_N_HEADS, Config.KV_MAX_SEQ)
+        self.stage = 2
+        
+        # Resetar momentos do Adam apenas para os parâmetros que mudaram drasticamente
+        self.opt = AdamOptimizer(self.store.total_params) 
+        print("✅ Expansão concluída.")
     
     def _forward(self,tokens,use_kv=False,positions=None,training=False):
         d=self.d_model; seq=tokens
@@ -610,80 +608,101 @@ class QICCRLLM:
         self.gpos+=1; return logits
     
     def train_step(self,contexts,targets):
-    d=self.d_model; bs=len(contexts); total_loss=0.0
-    for ctx,tgt in zip(contexts,targets):
-        seq=ctx[-Config.MAX_SEQ:]; sl=len(seq); pos=list(range(sl))
-        x=[self.store.read_vector_fp32(self.tok_off+tid*d,d) for tid in seq]; cl=[]
-        for layer in self.layers: x,c=layer.forward(x,self.store,kv_cache=None,positions=pos,training=True); cl.append(c)
-        final,lnc=self.ln.forward(x[-1],self.store)
-        final_saved=array.array('f',final)
-        ls=max(Config.LOGIT_SCALE_MIN,min(Config.LOGIT_SCALE_MAX,self.store.read_fp32(self.ls_off)))
-        raw_logits=array.array('f',[sum(self.store.read_fp32(self.tok_off+t*d+j)*final_saved[j] for j in range(d)) for t in range(Config.VOCAB_SIZE)])
-        logits=array.array('f',[ls*raw_logits[t] for t in range(Config.VOCAB_SIZE)])
-        probs=safe_softmax(logits)
-        smooth,V=Config.LABEL_SMOOTHING,Config.VOCAB_SIZE
-        td=array.array('f',[smooth/V]*V); td[tgt]=(1.0-smooth)+smooth/V
-        loss=-sum(td[i]*math.log(max(probs[i],1e-9)) for i in range(V))
-        norm=1.0/bs; gl=array.array('f',[(probs[i]-td[i])*norm for i in range(V)])
-        self.grads[self.ls_off]+=sum(gl[t]*raw_logits[t] for t in range(V))
-        gf=array.array('f',[0.0]*d)
-        for t in range(V):
-            g=gl[t]
-            for j in range(d): gf[j]+=self.store.read_fp32(self.tok_off+t*d+j)*g*ls; self.grads[self.tok_off+t*d+j]+=final_saved[j]*g*ls
-        gln=self.ln.backward(gf,lnc,self.store,self.grads)
-        glist=[array.array('f',[0.0]*d) for _ in range(sl)]; glist[-1]=gln
-        for idx in range(len(self.layers)-1,-1,-1): glist=self.layers[idx].backward(glist,cl[idx],self.store,self.grads)
-        en=norm/max(1,sl)
-        for pi,tid in enumerate(seq):
-            base=self.tok_off+tid*d
-            for j in range(d): self.grads[base+j]+=glist[pi][j]*en
-        total_loss+=loss
-    avg_loss=total_loss/bs
-    trainable=[(self.tok_off,Config.VOCAB_SIZE*d),(self.ln_off,2*d),(self.ls_off,1)]
-    for layer in self.layers:
-        for proj in [layer.q_proj,layer.k_proj,layer.v_proj,layer.o_proj,layer.ff_up,layer.ff_down]:
-            trainable.append((proj.offset,proj.W_size))
-        trainable.append((layer.ln1.offset,2*d)); trainable.append((layer.ln2.offset,2*d))
-    if self.step%100==0:
-        gn=math.sqrt(sum(self.grads[off+i]**2 for off,sz in trainable for i in range(sz)))
-        print(f"   [GradNorm] step {self.step}: {gn:.4f} | LR: {self._noam_lr(max(1,self.step)):.8f}")
-    self.opt.step(self.store.fp32,self.grads,trainable,self._noam_lr(max(1,self.step)),Config.WEIGHT_DECAY,Config.GRAD_CLIP)
-    self.step+=1; return avg_loss
+        d=self.d_model; bs=len(contexts); total_loss=0.0
+        for ctx,tgt in zip(contexts,targets):
+            seq=ctx[-Config.MAX_SEQ:]; sl=len(seq); pos=list(range(sl))
+            x=[self.store.read_vector_fp32(self.tok_off+tid*d,d) for tid in seq]; cl=[]
+            for layer in self.layers: x,c=layer.forward(x,self.store,kv_cache=None,positions=pos,training=True); cl.append(c)
+            final,lnc=self.ln.forward(x[-1],self.store)
+            ls=max(Config.LOGIT_SCALE_MIN,min(Config.LOGIT_SCALE_MAX,self.store.read_fp32(self.ls_off)))
+            logits=array.array('f',[ls*sum(self.store.read_fp32(self.tok_off+t*d+j)*final[j] for j in range(d)) for t in range(Config.VOCAB_SIZE)])
+            probs=safe_softmax(logits)
+            smooth,V=Config.LABEL_SMOOTHING,Config.VOCAB_SIZE
+            td=array.array('f',[smooth/V]*V); td[tgt]=(1.0-smooth)+smooth/V
+            loss=-sum(td[i]*math.log(max(probs[i],1e-9)) for i in range(V))
+            norm=1.0/bs; gl=array.array('f',[(probs[i]-td[i])*norm for i in range(V)])
+            gf=array.array('f',[0.0]*d)
+            for t in range(V):
+                g=gl[t]
+                for j in range(d): gf[j]+=self.store.read_fp32(self.tok_off+t*d+j)*g*ls; self.grads[self.tok_off+t*d+j]+=final[j]*g*ls
+            self.grads[self.ls_off]+=sum(gl[t]*sum(self.store.read_fp32(self.tok_off+t*d+j)*final[j] for j in range(d)) for t in range(V))
+            gln=self.ln.backward(gf,lnc,self.store,self.grads)
+            glist=[array.array('f',[0.0]*d) for _ in range(sl)]; glist[-1]=gln
+            for idx in range(len(self.layers)-1,-1,-1): glist=self.layers[idx].backward(glist,cl[idx],self.store,self.grads)
+            en=norm/max(1,sl)
+            for pi,tid in enumerate(seq):
+                base=self.tok_off+tid*d
+                for j in range(d): self.grads[base+j]+=glist[pi][j]*en
+            total_loss+=loss
+        avg_loss=total_loss/bs
+        trainable=[(self.tok_off,Config.VOCAB_SIZE*d),(self.ln_off,2*d),(self.ls_off,1)]
+        for layer in self.layers:
+            for proj in [layer.q_proj,layer.k_proj,layer.v_proj,layer.o_proj,layer.ff_up,layer.ff_down]:
+                trainable.append((proj.offset,proj.W_size))
+            trainable.append((layer.ln1.offset,2*d)); trainable.append((layer.ln2.offset,2*d))
+        if self.step%100==0:
+            gn=math.sqrt(sum(self.grads[off+i]**2 for off,sz in trainable for i in range(sz)))
+            print(f"   [GradNorm] step {self.step}: {gn:.4f} | LR: {self._noam_lr(max(1,self.step)):.8f}")
+        self.opt.step(self.store.fp32,self.grads,trainable,self._noam_lr(max(1,self.step)),Config.WEIGHT_DECAY,Config.GRAD_CLIP)
+        self.step+=1; return avg_loss
     
     def generate_beam(self,prompt,max_new=80,temp=0.7,bw=None):
-    if bw is None: bw=Config.BEAM_WIDTH
-    EOS=self.tokenizer.st.get('</s>',3); d=self.d_model; nl=self.n_layers
-    pt=list(self.tokenizer.encode(prompt))
-    def make_initial():
-        cache=KVCache(nl,self.n_heads,d//self.n_heads,Config.KV_MAX_SEQ)
-        pos=list(range(len(pt)))
-        x=[self.store.read_vector_fp32(self.tok_off+tid*d,d) for tid in pt]
-        for layer in self.layers: x,_=layer.forward(x,self.store,kv_cache=cache,positions=pos,training=False)
-        final,_=self.ln.forward(x[-1],self.store)
-        ls=max(Config.LOGIT_SCALE_MIN,min(Config.LOGIT_SCALE_MAX,self.store.read_fp32(self.ls_off)))
-        logits=array.array('f',[ls*sum(self.store.read_fp32(self.tok_off+t*d+j)*final[j] for j in range(d)) for t in range(Config.VOCAB_SIZE)])
-        return logits,cache,len(pt)
-    first_logits,first_cache,first_pos=make_initial()
-    lt=array.array('f',[l/temp for l in first_logits]); probs=safe_softmax(lt)
-    topk=sorted(enumerate(probs),key=lambda x:x[1],reverse=True)[:bw]
-    beams=[{'tokens':pt+[tid],'log_prob':math.log(max(p,1e-9)),'cache':first_cache.clone(),'pos':first_pos,'finished':tid==EOS} for tid,p in topk]
-    for _ in range(max_new-1):
-        if all(b['finished'] for b in beams): break
-        candidates=[]
-        for b in beams:
-            if b['finished']: candidates.append(b); continue
-            last=b['tokens'][-1]; cp=b['pos']
-            x=[self.store.read_vector_fp32(self.tok_off+last*d,d)]
-            for layer in self.layers: x,_=layer.forward(x,self.store,kv_cache=b['cache'],positions=[cp],training=False)
+        if bw is None: bw=Config.BEAM_WIDTH
+        EOS=self.tokenizer.st.get('</s>',3); d=self.d_model; nl=self.n_layers
+        pt=list(self.tokenizer.encode(prompt))
+        def make_initial():
+            cache=KVCache(nl,Config.N_HEADS,d//Config.N_HEADS,Config.KV_MAX_SEQ)
+            pos=list(range(len(pt)))
+            x=[self.store.read_vector_fp32(self.tok_off+tid*d,d) for tid in pt]
+            for layer in self.layers: x,_=layer.forward(x,self.store,kv_cache=cache,positions=pos,training=False)
             final,_=self.ln.forward(x[-1],self.store)
             ls=max(Config.LOGIT_SCALE_MIN,min(Config.LOGIT_SCALE_MAX,self.store.read_fp32(self.ls_off)))
             logits=array.array('f',[ls*sum(self.store.read_fp32(self.tok_off+t*d+j)*final[j] for j in range(d)) for t in range(Config.VOCAB_SIZE)])
-            lt=array.array('f',[l/temp for l in logits]); probs=safe_softmax(lt)
-            for tid,p in sorted(enumerate(probs),key=lambda x:x[1],reverse=True)[:bw]:
-                nc=b['cache'].clone()
-                candidates.append({'tokens':b['tokens']+[tid],'log_prob':b['log_prob']+math.log(max(p,1e-9)),'cache':nc,'pos':cp+1,'finished':tid==EOS})
-        beams=sorted(candidates,key=lambda x:x['log_prob'],reverse=True)[:bw]
-    return self.tokenizer.decode(beams[0]['tokens'][len(pt):])
+            return logits,cache,len(pt)
+        first_logits,first_cache,first_pos=make_initial()
+        lt=array.array('f',[l/temp for l in first_logits]); probs=safe_softmax(lt)
+        topk=sorted(enumerate(probs),key=lambda x:x[1],reverse=True)[:bw]
+        beams=[{'tokens':pt+[tid],'log_prob':math.log(max(p,1e-9)),'cache':first_cache.clone(),'pos':first_pos,'finished':tid==EOS} for tid,p in topk]
+        for _ in range(max_new-1):
+            if all(b['finished'] for b in beams): break
+            candidates=[]
+            for b in beams:
+                if b['finished']: candidates.append(b); continue
+                last=b['tokens'][-1]; cp=b['pos']
+                x=[self.store.read_vector_fp32(self.tok_off+last*d,d)]
+                for layer in self.layers: x,_=layer.forward(x,self.store,kv_cache=b['cache'],positions=[cp],training=False)
+                final,_=self.ln.forward(x[-1],self.store)
+                ls=max(Config.LOGIT_SCALE_MIN,min(Config.LOGIT_SCALE_MAX,self.store.read_fp32(self.ls_off)))
+                logits=array.array('f',[ls*sum(self.store.read_fp32(self.tok_off+t*d+j)*final[j] for j in range(d)) for t in range(Config.VOCAB_SIZE)])
+                lt=array.array('f',[l/temp for l in logits]); probs=safe_softmax(lt)
+                for tid,p in sorted(enumerate(probs),key=lambda x:x[1],reverse=True)[:bw]:
+                    nc=b['cache'].clone()
+                    candidates.append({'tokens':b['tokens']+[tid],'log_prob':b['log_prob']+math.log(max(p,1e-9)),'cache':nc,'pos':cp+1,'finished':tid==EOS})
+            beams=sorted(candidates,key=lambda x:x['log_prob'],reverse=True)[:bw]
+        return self.tokenizer.decode(beams[0]['tokens'][len(pt):])
+    
+    def generate(self,prompt,max_new=120,temp=0.75,top_k=50,top_p=0.90,use_beam=False):
+        if use_beam: return self.generate_beam(prompt,max_new,temp)
+        tokens=list(self.tokenizer.encode(prompt)); logits=self.prefill(tokens)
+        for _ in range(max_new):
+            recent=set(tokens[-32:]); logits=array.array('f',list(logits))
+            for t in recent: logits[t]=logits[t]/Config.REPETITION_PENALTY if logits[t]>0 else logits[t]*Config.REPETITION_PENALTY
+            logits=array.array('f',[l/temp for l in logits])
+            idx=sorted(enumerate(logits),key=lambda x:x[1],reverse=True)[:top_k]
+            if top_p<1.0 and idx:
+                p=safe_softmax(array.array('f',[t[1] for t in idx])); cum,cut=0.0,len(idx)
+                for i,pi in enumerate(p):
+                    cum+=pi
+                    if cum>=top_p: cut=i+1; break
+                idx=idx[:max(1,cut)]
+            p=safe_softmax(array.array('f',[t[1] for t in idx])); r,cum=random.random(),0.0; ch=idx[-1][0]
+            for i,(tid,_) in enumerate(idx):
+                cum+=p[i]
+                if r<=cum: ch=tid; break
+            tokens.append(ch)
+            if ch==self.tokenizer.st.get('</s>',3): break
+            logits=self.decode_step(ch)
+        return self.tokenizer.decode(tokens[len(self.tokenizer.encode(prompt)):])
     
     def save(self,path="qiccr_v7"):
         with open(path+"_fp32.bin",'wb') as f: f.write(self.store.fp32.tobytes())
@@ -694,17 +713,17 @@ class QICCRLLM:
         with gzip.open(path+"_meta.json.gz",'wt') as f: json.dump(meta,f)
     
     def load(self,path="qiccr_v7"):
-    if not os.path.exists(path+"_fp32.bin"): return False
-    with open(path+"_fp32.bin",'rb') as f: self.store.fp32=array.array('f'); self.store.fp32.frombytes(f.read())
-    self.opt.load(path+"_optim.json.gz")
-    with gzip.open(path+"_meta.json.gz",'rt') as f: meta=json.load(f)
-    self.step=meta['step']; self.stage=meta.get('stage',2)
-    self.tokenizer.merges={tuple(map(int,k.split(','))):v for k,v in meta['merges'].items()}
-    self.tokenizer.merge_rank={tuple(map(int,k.split(','))):v for k,v in meta.get('merge_rank',{}).items()}
-    self.tokenizer.vocab={int(k):bytes(v) for k,v in meta['vocab'].items()}
-    self.tokenizer.reverse_vocab={v:k for k,v in self.tokenizer.vocab.items()}
-    self.tokenizer.next_id=meta.get('next_id',4)
-    return True
+        if not os.path.exists(path+"_fp32.bin"): return False
+        with open(path+"_fp32.bin",'rb') as f: self.store.fp32=array.array('f'); self.store.fp32.frombytes(f.read())
+        self.opt.load(path+"_optim.json.gz")
+        with gzip.open(path+"_meta.json.gz",'rt') as f: meta=json.load(f)
+        self.step=meta['step']; self.stage=meta.get('stage',2)
+        self.tokenizer.merges={tuple(map(int,k.split(','))):v for k,v in meta['merges'].items()}
+        self.tokenizer.merge_rank={tuple(map(int,k.split(','))):v for k,v in meta.get('merge_rank',{}).items()}
+        self.tokenizer.vocab={int(k):bytes(v) for k,v in meta['vocab'].items()}
+        self.tokenizer.reverse_vocab={v:k for k,v in self.tokenizer.vocab.items()}
+        self.tokenizer.next_id=meta.get('next_id',4)
+        return True
 
 # ====================================================================
 # TREINAMENTO COM ESTÁGIOS (REFATORADO)
@@ -756,7 +775,8 @@ def train_model(model, file="treino.txt"):
             if (i + 1) % 500 == 0 or i == steps - 1:
                 avg = total_loss / (i + 1)
                 print(f"   Passo {i+1:5d}/{steps} | Loss: {avg:.4f}")
-                
+
+        # Lógica de salvamento ao final de cada estágio importante
         current_avg = total_loss / steps
         if current_avg < best_loss:
             best_loss = current_avg
@@ -796,13 +816,16 @@ if __name__ == "__main__":
     if "--train" in sys.argv:
         train_model(model)
     else:
+        # Tenta carregar o melhor modelo primeiro, depois o último
         loaded = False
-        for tag in ("qiccr_v7_best","qiccr_v7_latest"):
-    if os.path.exists(tag+"_fp32.bin"):
-        try:
-            loaded=model.load(tag)
-            if loaded: print(f"✅ Modelo carregado: {tag}"); break
-        except: continue
+        for tag in ("qiccr_v7_best", "qiccr_v7_latest"):
+            if os.path.exists(tag + "_fp32.bin") or os.path.exists(tag + ".json"): # ajuste conforme seu model.save
+                try:
+                    loaded = model.load(tag)
+                    if loaded: 
+                        print(f"✅ Modelo carregado: {tag}")
+                        break
+                except: continue
         
         if not loaded: 
             print("⚠️ Sem checkpoint encontrado. Iniciando chat com pesos aleatórios ou use --train")
