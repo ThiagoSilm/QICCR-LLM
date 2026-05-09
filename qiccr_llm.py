@@ -686,17 +686,17 @@ class QICCRLLM:
         with gzip.open(path+"_meta.json.gz",'wt') as f: json.dump(meta,f)
     
     def load(self,path="qiccr_v7"):
-        if not os.path.exists(path+"_fp32.bin"): return False
-        with open(path+"_fp32.bin",'rb') as f: self.store.fp32=array.array('f'); self.store.fp32.frombytes(f.read())
-        self.opt.load(path+"_optim.json.gz")
-        with gzip.open(path+"_meta.json.gz",'rt') as f: meta=json.load(f)
-        self.step=meta['step']; self.stage=meta.get('stage',2)
-        self.tokenizer.merges={tuple(map(int,k.split(','))):v for k,v in meta['merges'].items()}
-        self.tokenizer.merge_rank={tuple(map(int,k.split(','))):v for k,v in meta.get('merge_rank',{}).items()}
-        self.tokenizer.vocab={int(k):bytes(v) for k,v in meta['vocab'].items()}
-        self.tokenizer.reverse_vocab={v:k for k,v in self.tokenizer.vocab.items()}
-        self.tokenizer.next_id=meta.get('next_id',4)
-        return True
+    if not os.path.exists(path+"_fp32.bin"): return False
+    with open(path+"_fp32.bin",'rb') as f: self.store.fp32=array.array('f'); self.store.fp32.frombytes(f.read())
+    self.opt.load(path+"_optim.json.gz")
+    with gzip.open(path+"_meta.json.gz",'rt') as f: meta=json.load(f)
+    self.step=meta['step']; self.stage=meta.get('stage',2)
+    self.tokenizer.merges={tuple(map(int,k.split(','))):v for k,v in meta['merges'].items()}
+    self.tokenizer.merge_rank={tuple(map(int,k.split(','))):v for k,v in meta.get('merge_rank',{}).items()}
+    self.tokenizer.vocab={int(k):bytes(v) for k,v in meta['vocab'].items()}
+    self.tokenizer.reverse_vocab={v:k for k,v in self.tokenizer.vocab.items()}
+    self.tokenizer.next_id=meta.get('next_id',4)
+    return True
 
 # ====================================================================
 # TREINAMENTO COM ESTÁGIOS (REFATORADO)
@@ -748,8 +748,7 @@ def train_model(model, file="treino.txt"):
             if (i + 1) % 500 == 0 or i == steps - 1:
                 avg = total_loss / (i + 1)
                 print(f"   Passo {i+1:5d}/{steps} | Loss: {avg:.4f}")
-
-        # Lógica de salvamento ao final de cada estágio importante
+                
         current_avg = total_loss / steps
         if current_avg < best_loss:
             best_loss = current_avg
@@ -789,16 +788,13 @@ if __name__ == "__main__":
     if "--train" in sys.argv:
         train_model(model)
     else:
-        # Tenta carregar o melhor modelo primeiro, depois o último
         loaded = False
-        for tag in ("qiccr_v7_best", "qiccr_v7_latest"):
-            if os.path.exists(tag + "_fp32.bin") or os.path.exists(tag + ".json"): # ajuste conforme seu model.save
-                try:
-                    loaded = model.load(tag)
-                    if loaded: 
-                        print(f"✅ Modelo carregado: {tag}")
-                        break
-                except: continue
+        for tag in ("qiccr_v7_best","qiccr_v7_latest"):
+    if os.path.exists(tag+"_fp32.bin"):
+        try:
+            loaded=model.load(tag)
+            if loaded: print(f"✅ Modelo carregado: {tag}"); break
+        except: continue
         
         if not loaded: 
             print("⚠️ Sem checkpoint encontrado. Iniciando chat com pesos aleatórios ou use --train")
