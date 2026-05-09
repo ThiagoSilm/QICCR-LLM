@@ -706,85 +706,108 @@ class QICCRLLM:
         return True
 
 # ====================================================================
-# TREINAMENTO COM ESTÁGIOS
+# TREINAMENTO COM ESTÁGIOS (REFATORADO)
 # ====================================================================
-def train_model(model,file="treino.txt"):
-    if not os.path.exists(file): print("❌ Arquivo não encontrado!"); return
-    with open(file,'r',encoding='utf-8') as f: text=f.read().strip()
-    print(f"📚 {len(text):,} caracteres"); model.tokenizer.train([text])
-    toks=list(model.tokenizer.encode(text)); print(f"🔢 {len(toks):,} tokens")
+def train_model(model, file="treino.txt"):
+    if not os.path.exists(file): 
+        print("❌ Arquivo não encontrado!"); return
     
-    # === ESTÁGIO 1: Modelo pequeno ===
-    print("\n🔥 ESTÁGIO 1: Modelo pequeno (1 camada, d=64)")
-    best=float('inf')
-    for ep in range(1):
-        steps=min(Config.S1_STEPS,len(toks)-Config.TRAIN_WINDOW_MAX-2); total=0.0
-        print(f"🏋️  Epoch {ep+1} ({steps} passos, batch={Config.BATCH_SIZE})...")
-        for i in range(steps):
-            bctx,btgt=[],[]
-            for _ in range(Config.BATCH_SIZE):
-                w=random.randint(Config.TRAIN_WINDOW_MIN,Config.TRAIN_WINDOW_MAX)
-                s=random.randint(0,max(0,len(toks)-w-2))
-                bctx.append(toks[s:s+w]); btgt.append(toks[s+w])
-            loss=model.train_step(bctx,btgt); total+=loss
-            if (i+1)%500==0 or i==steps-1: print(f"   Passo {i+1:5d}/{steps} | Loss: {total/(i+1):.4f}")
-        print(f"✅ Estágio 1 — Loss: {total/steps:.4f}")
+    with open(file, 'r', encoding='utf-8') as f: 
+        text = f.read().strip()
     
-    # === ESTÁGIO 2: Expansão + treino ===
-    model.expand_to_stage2()
-    print(f"\n🔥 ESTÁGIO 2: Modelo expandido (2 camadas, d=128)")
-    for ep in range(1):
-        steps=min(Config.S2_STEPS,len(toks)-Config.TRAIN_WINDOW_MAX-2); total=0.0
-        print(f"🏋️  Epoch {ep+1} ({steps} passos, batch={Config.BATCH_SIZE})...")
-        for i in range(steps):
-            bctx,btgt=[],[]
-            for _ in range(Config.BATCH_SIZE):
-                w=random.randint(Config.TRAIN_WINDOW_MIN,Config.TRAIN_WINDOW_MAX)
-                s=random.randint(0,max(0,len(toks)-w-2))
-                bctx.append(toks[s:s+w]); btgt.append(toks[s+w])
-            loss=model.train_step(bctx,btgt); total+=loss
-            if (i+1)%500==0 or i==steps-1: print(f"   Passo {i+1:5d}/{steps} | Loss: {total/(i+1):.4f}")
-        print(f"✅ Estágio 2 — Loss: {total/steps:.4f}")
+    print(f"📚 {len(text):,} caracteres")
+    model.tokenizer.train([text])
+    toks = list(model.tokenizer.encode(text))
+    print(f"🔢 {len(toks):,} tokens")
     
-    # === ESTÁGIO 3: Fine-tuning ===
-    print(f"\n🔥 ESTÁGIO 3: Fine-tuning final")
-    for ep in range(1):
-        steps=min(Config.S3_STEPS,len(toks)-Config.TRAIN_WINDOW_MAX-2); total=0.0
-        print(f"🏋️  Epoch {ep+1} ({steps} passos, batch={Config.BATCH_SIZE})...")
-        for i in range(steps):
-            bctx,btgt=[],[]
-            for _ in range(Config.BATCH_SIZE):
-                w=random.randint(Config.TRAIN_WINDOW_MIN,Config.TRAIN_WINDOW_MAX)
-                s=random.randint(0,max(0,len(toks)-w-2))
-                bctx.append(toks[s:s+w]); btgt.append(toks[s+w])
-            loss=model.train_step(bctx,btgt); total+=loss
-            if (i+1)%500==0 or i==steps-1: print(f"   Passo {i+1:5d}/{steps} | Loss: {total/(i+1):.4f}")
-        avg=total/steps; print(f"✅ Estágio 3 — Loss: {avg:.4f}")
-        model.save("qiccr_v7_final" if avg<best-0.001 else "qiccr_v7_latest")
-    
-    print("🏁 Treinamento completo!")
+    # Definição dos estágios para iterar
+    stages = [
+        {"name": "ESTÁGIO 1: Modelo Base (1 camada, d=64)", "steps": Config.S1_STEPS, "expand": False},
+        {"name": "ESTÁGIO 2: Expansão (2 camadas, d=128)", "steps": Config.S2_STEPS, "expand": True},
+        {"name": "ESTÁGIO 3: Fine-tuning Final", "steps": Config.S3_STEPS, "expand": False}
+    ]
 
+    best_loss = float('inf')
+
+    for idx, stage in enumerate(stages):
+        if stage["expand"]:
+            model.expand_to_stage2()
+        
+        print(f"\n🔥 {stage['name']}")
+        steps = min(stage["steps"], len(toks) - Config.TRAIN_WINDOW_MAX - 2)
+        total_loss = 0.0
+        
+        # Epoch única por estágio para simplificar
+        print(f"🏋️ Treinando ({steps} passos, batch={Config.BATCH_SIZE})...")
+        
+        for i in range(steps):
+            bctx, btgt = [], []
+            for _ in range(Config.BATCH_SIZE):
+                # Janela dinâmica para robustez
+                w = random.randint(Config.TRAIN_WINDOW_MIN, Config.TRAIN_WINDOW_MAX)
+                s = random.randint(0, max(0, len(toks) - w - 2))
+                bctx.append(toks[s:s+w])
+                btgt.append(toks[s+w])
+            
+            loss = model.train_step(bctx, btgt)
+            total_loss += loss
+            
+            if (i + 1) % 500 == 0 or i == steps - 1:
+                avg = total_loss / (i + 1)
+                print(f"   Passo {i+1:5d}/{steps} | Loss: {avg:.4f}")
+
+        # Lógica de salvamento ao final de cada estágio importante
+        current_avg = total_loss / steps
+        if current_avg < best_loss:
+            best_loss = current_avg
+            model.save("qiccr_v7_best")
+        model.save("qiccr_v7_latest")
+
+    print("\n🏁 Treinamento completo e modelo salvo!")
+
+# ====================================================================
+# INTERFACE E EXECUÇÃO
+# ====================================================================
 def interactive_chat(model):
     print("\n🚀 QICCR-LLM v7.0 | 'sair' | 'reset' | 'beam'\n")
-    use_beam=False
+    use_beam = False
     while True:
         try:
-            q=input("🧑 Você: ").strip()
+            q = input("🧑 Você: ").strip()
             if not q: continue
-            if q.lower() in ('sair','exit','quit'): break
-            if q.lower()=='reset': model.kv.clear(); model.gpos=0; print("✅\n"); continue
-            if q.lower()=='beam': use_beam=not use_beam; print(f"✅ Beam: {'ON' if use_beam else 'OFF'}\n"); continue
-            print(f"🐶 Qiccr: {model.generate(q,max_new=80,temp=0.7,use_beam=use_beam)}\n")
-        except KeyboardInterrupt: break
+            if q.lower() in ('sair', 'exit', 'quit'): break
+            if q.lower() == 'reset': 
+                model.kv.clear(); model.gpos = 0
+                print("✅ Cache resetado.\n"); continue
+            if q.lower() == 'beam': 
+                use_beam = not use_beam
+                print(f"✅ Beam Search: {'LIGADO' if use_beam else 'DESLIGADO'}\n"); continue
+            
+            # Nota: Certifique-se que o método generate existe na classe QICCRLLM
+            res = model.generate(q, max_new=80, temp=0.7, use_beam=use_beam)
+            print(f"🐶 Qiccr: {res}\n")
+        except KeyboardInterrupt: 
+            break
 
-if __name__=="__main__":
+if __name__ == "__main__":
     random.seed(42)
-    model=QICCRLLM()
+    model = QICCRLLM()
+    
     if "--train" in sys.argv:
         train_model(model)
     else:
-        loaded=False
-        for tag in ("qiccr_v7_final","qiccr_v7_latest"):
-            if os.path.exists(tag+"_fp32.bin"): loaded=model.load(tag); break
-        if not loaded: print("⚠️ Sem checkpoint. Use --train")
+        # Tenta carregar o melhor modelo primeiro, depois o último
+        loaded = False
+        for tag in ("qiccr_v7_best", "qiccr_v7_latest"):
+            if os.path.exists(tag + "_fp32.bin") or os.path.exists(tag + ".json"): # ajuste conforme seu model.save
+                try:
+                    loaded = model.load(tag)
+                    if loaded: 
+                        print(f"✅ Modelo carregado: {tag}")
+                        break
+                except: continue
+        
+        if not loaded: 
+            print("⚠️ Sem checkpoint encontrado. Iniciando chat com pesos aleatórios ou use --train")
+        
         interactive_chat(model)
