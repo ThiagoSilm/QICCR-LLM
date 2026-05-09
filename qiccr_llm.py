@@ -352,8 +352,8 @@ class TransformerBlock:
         gd=[self.ff_down.backward(array.array('f',[grad_output_list[i][j] for j in range(d_model)]),c['down_caches'][i],c['down_masks'][i],store,grads) for i in range(seq_len)]
         gpost=[array.array('f',[gd[i][k]*gelu_derivative_arr(c['pre_gelu'][i])[k] for k in range(len(gd[i]))]) for i in range(seq_len)]
         gu=[self.ff_up.backward(gpost[i],c['up_caches'][i],c['up_masks'][i],store,grads) for i in range(seq_len)]
-        gl2=[self.ln2.backward(array.array('f',[gu[i][j]+grad_output_list[i][j] for j in range(d_model)]),c['ln2_caches'][i],store,grads) for i in range(seq_len)]
-        go=[self.o_proj.backward(array.array('f',[gl2[i][j]+grad_output_list[i][j] for j in range(d_model)]),c['o_caches'][i],c['o_masks'][i],store,grads) for i in range(seq_len)]
+        gl2=[self.ln2.backward(gu[i],c['ln2_caches'][i],store,grads) for i in range(seq_len)]
+        go=[self.o_proj.backward(array.array('f',[grad_output_list[i][j]+gl2[i][j] for j in range(d_model)]),c['o_caches'][i],c['o_masks'][i],store,grads) for i in range(seq_len)]  
         gQ=[array.array('f',[0.0]*d_model) for _ in range(seq_len)]
         gK=[array.array('f',[0.0]*d_model) for _ in range(seq_len)]
         gV=[array.array('f',[0.0]*d_model) for _ in range(seq_len)]
@@ -643,7 +643,7 @@ class QICCRLLM:
         EOS=self.tokenizer.st.get('</s>',3); d=self.d_model; nl=self.n_layers
         pt=list(self.tokenizer.encode(prompt))
         def make_initial():
-            cache=KVCache(nl,Config.N_HEADS,d//Config.N_HEADS,Config.KV_MAX_SEQ)
+            cache=KVCache(nl,self.n_heads,d//self.n_heads,Config.KV_MAX_SEQ)
             pos=list(range(len(pt)))
             x=[self.store.read_vector_fp32(self.tok_off+tid*d,d) for tid in pt]
             for layer in self.layers: x,_=layer.forward(x,self.store,kv_cache=cache,positions=pos,training=False)
@@ -811,7 +811,7 @@ if __name__ == "__main__":
         # Tenta carregar o melhor modelo primeiro, depois o último
         loaded = False
         for tag in ("qiccr_v7_best", "qiccr_v7_latest"):
-            if os.path.exists(tag + "_fp32.bin") or os.path.exists(tag + ".json"): # ajuste conforme seu model.save
+            if os.path.exists(tag+"_fp32.bin"):
                 try:
                     loaded = model.load(tag)
                     if loaded: 
