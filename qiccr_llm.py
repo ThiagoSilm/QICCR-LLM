@@ -384,7 +384,7 @@ class TransformerBlock:
         gk=[self.k_proj.backward(gK[i],c['k_caches'][i],c['k_masks'][i],store,grads) for i in range(seq_len)]
         gv=[self.v_proj.backward(gV[i],c['v_caches'][i],c['v_masks'][i],store,grads) for i in range(seq_len)]
         gl1=[self.ln1.backward(array.array('f',[gq[i][j]+gk[i][j]+gv[i][j] for j in range(d_model)]),c['ln1_caches'][i],store,grads) for i in range(seq_len)]
-        return gl1
+        return [array.array('f',[grad_output_list[i][j]+gl1[i][j] for j in range(d_model)]) for i in range(seq_len)]
 
 # ====================================================================
 # TOKENIZER
