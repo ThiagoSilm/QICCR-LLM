@@ -345,45 +345,50 @@ class TransformerBlock:
         return x, caches
     
     def backward(self, grad_output_list, caches, store, grads):
-        if not self.trainable or not caches: return [array.array('f',[0.0]*self.d_model) for _ in grad_output_list]
-        c=caches; seq_len=len(grad_output_list); d_model=self.d_model; d_head=self.d_head
-        n_heads=self.n_heads; scale=math.sqrt(d_head); positions=c['positions']
-        gd=[self.ff_down.backward(array.array('f',[grad_output_list[i][j] for j in range(d_model)]),c['down_caches'][i],c['down_masks'][i],store,grads) for i in range(seq_len)]
-        gpost=[array.array('f',[gd[i][k]*gelu_derivative_arr(c['pre_gelu'][i])[k] for k in range(len(gd[i]))]) for i in range(seq_len)]
-        gu=[self.ff_up.backward(gpost[i],c['up_caches'][i],c['up_masks'][i],store,grads) for i in range(seq_len)]
-        gl2=[self.ln2.backward(array.array('f',[gu[i][j]+grad_output_list[i][j] for j in range(d_model)]),c['ln2_caches'][i],store,grads) for i in range(seq_len)]
-        go=[self.o_proj.backward(array.array('f',[gl2[i][j]+grad_output_list[i][j] for j in range(d_model)]),c['o_caches'][i],c['o_masks'][i],store,grads) for i in range(seq_len)]
-        gQ=[array.array('f',[0.0]*d_model) for _ in range(seq_len)]
-        gK=[array.array('f',[0.0]*d_model) for _ in range(seq_len)]
-        gV=[array.array('f',[0.0]*d_model) for _ in range(seq_len)]
-        for h in range(n_heads):
-            s,e=h*d_head,(h+1)*d_head; Vh=c['V_heads'][h]; ph=c['all_probs'][h]; mh=c['causal_mask'][h]
-            Kh_h=c['K_heads'][h]; Qh_h=c['Q_heads'][h]; total_len=len(Vh)
-            for i in range(seq_len):
-                gh=array.array('f',[go[i][s+k] for k in range(d_head)]); probs=ph[i]; mi=mh[i]
-                gp=[0.0]*total_len
-                for j in range(total_len):
-                    if mi[j]:
-                        acc=0.0
-                        for k in range(d_head): acc+=float(gh[k])*float(Vh[j][k])
-                        gp[j]=acc
-                gs=softmax_backward(probs,mi,gp,scale)
-                for j in range(total_len):
-                    if not mi[j] or abs(gs[j])<1e-30: continue
-                    Kh_j=Kh_h[j]; Qh_i=Qh_h[i]
-                    for k in range(d_head): gQ[i][s+k]+=gs[j]*float(Kh_j[k]); gK[j][s+k]+=gs[j]*float(Qh_i[k])
-                for j in range(total_len):
-                    if not mi[j]: continue
-                    p=float(probs[j])
-                    if p<=0: continue
-                    for k in range(d_head): gV[j][s+k]+=p*float(gh[k])
-        for i in range(seq_len): gQ[i]=self.rope.inverse_rotate(gQ[i],positions[i])
-        for j in range(seq_len): gK[j]=self.rope.inverse_rotate(gK[j],positions[j])
-        gq=[self.q_proj.backward(gQ[i],c['q_caches'][i],c['q_masks'][i],store,grads) for i in range(seq_len)]
-        gk=[self.k_proj.backward(gK[i],c['k_caches'][i],c['k_masks'][i],store,grads) for i in range(seq_len)]
-        gv=[self.v_proj.backward(gV[i],c['v_caches'][i],c['v_masks'][i],store,grads) for i in range(seq_len)]
-        gl1=[self.ln1.backward(array.array('f',[gq[i][j]+gk[i][j]+gv[i][j] for j in range(d_model)]),c['ln1_caches'][i],store,grads) for i in range(seq_len)]
-        return gl1
+    if not self.trainable or not caches: return [array.array('f',[0.0]*self.d_model) for _ in grad_output_list]
+    c=caches; seq_len=len(grad_output_list); d_model=self.d_model; d_head=self.d_head
+    n_heads=self.n_heads; scale=math.sqrt(d_head); positions=c['positions']
+    
+    gd=[self.ff_down.backward(grad_output_list[i],c['down_caches'][i],c['down_masks'][i],store,grads) for i in range(seq_len)]
+    gpost=[array.array('f',[gd[i][k]*gelu_derivative_arr(c['pre_gelu'][i])[k] for k in range(len(gd[i]))]) for i in range(seq_len)]
+    gu=[self.ff_up.backward(gpost[i],c['up_caches'][i],c['up_masks'][i],store,grads) for i in range(seq_len)]
+    gl2=[self.ln2.backward(gu[i],c['ln2_caches'][i],store,grads) for i in range(seq_len)]
+    grad_res2=[array.array('f',[grad_output_list[i][j]+gl2[i][j] for j in range(d_model)]) for i in range(seq_len)]
+    
+    go=[self.o_proj.backward(grad_res2[i],c['o_caches'][i],c['o_masks'][i],store,grads) for i in range(seq_len)]
+    gQ=[array.array('f',[0.0]*d_model) for _ in range(seq_len)]
+    gK=[array.array('f',[0.0]*d_model) for _ in range(seq_len)]
+    gV=[array.array('f',[0.0]*d_model) for _ in range(seq_len)]
+    for h in range(n_heads):
+        s,e=h*d_head,(h+1)*d_head; Vh=c['V_heads'][h]; ph=c['all_probs'][h]; mh=c['causal_mask'][h]
+        Kh_h=c['K_heads'][h]; Qh_h=c['Q_heads'][h]; total_len=len(Vh)
+        for i in range(seq_len):
+            gh=array.array('f',[go[i][s+k] for k in range(d_head)]); probs=ph[i]; mi=mh[i]
+            gp=[0.0]*total_len
+            for j in range(total_len):
+                if mi[j]:
+                    acc=0.0
+                    for k in range(d_head): acc+=float(gh[k])*float(Vh[j][k])
+                    gp[j]=acc
+            gs=softmax_backward(probs,mi,gp,scale)
+            for j in range(total_len):
+                if not mi[j] or abs(gs[j])<1e-30: continue
+                Kh_j=Kh_h[j]; Qh_i=Qh_h[i]
+                for k in range(d_head): gQ[i][s+k]+=gs[j]*float(Kh_j[k]); gK[j][s+k]+=gs[j]*float(Qh_i[k])
+            for j in range(total_len):
+                if not mi[j]: continue
+                p=float(probs[j])
+                if p<=0: continue
+                for k in range(d_head): gV[j][s+k]+=p*float(gh[k])
+    
+    for i in range(seq_len): gQ[i]=self.rope.inverse_rotate(gQ[i],positions[i])
+    for j in range(seq_len): gK[j]=self.rope.inverse_rotate(gK[j],positions[j])
+    gq=[self.q_proj.backward(gQ[i],c['q_caches'][i],c['q_masks'][i],store,grads) for i in range(seq_len)]
+    gk=[self.k_proj.backward(gK[i],c['k_caches'][i],c['k_masks'][i],store,grads) for i in range(seq_len)]
+    gv=[self.v_proj.backward(gV[i],c['v_caches'][i],c['v_masks'][i],store,grads) for i in range(seq_len)]
+    grad_attn=[array.array('f',[gq[i][j]+gk[i][j]+gv[i][j] for j in range(d_model)]) for i in range(seq_len)]
+    gl1=[self.ln1.backward(grad_attn[i],c['ln1_caches'][i],store,grads) for i in range(seq_len)]
+    return [array.array('f',[grad_res2[i][j]+gl1[i][j] for j in range(d_model)]) for i in range(seq_len)]
 
 # ====================================================================
 # TOKENIZER
