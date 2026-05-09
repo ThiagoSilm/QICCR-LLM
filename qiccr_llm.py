@@ -1,14 +1,6 @@
 """
-QICCR-LLM v7.0 — Staged Training com Model Growth (CÓDIGO COMPLETO)
+QICCR-LLM v7.0
 =====================================================================
-Estratégia:
-- Estágio 1: 1 camada, d_model=64, 2 cabeças, d_ff=128 (2000 passos)
-- Estágio 2: Expansão para 2 camadas, d_model=128, 4 cabeças, d_ff=256 (4000 passos)
-  * Depth-stacking: duplica camada 1 → camada 2
-  * Width growth: interpola pesos para novo d_model
-- Estágio 3: Fine-tuning completo (2000 passos)
-
-Baseado em Shen et al. (2022), Du et al. (2024), Yano et al. (2025).
 """
 
 import math, random, os, sys, array, json, gzip, heapq
