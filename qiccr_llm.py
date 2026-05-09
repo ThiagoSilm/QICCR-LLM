@@ -643,62 +643,39 @@ class QICCRLLM:
         self.step+=1; return avg_loss
     
     def generate_beam(self,prompt,max_new=80,temp=0.7,bw=None):
-        if bw is None: bw=Config.BEAM_WIDTH
-        EOS=self.tokenizer.st.get('</s>',3); d=self.d_model; nl=self.n_layers
-        pt=list(self.tokenizer.encode(prompt))
-        def make_initial():
-            cache=KVCache(nl,Config.N_HEADS,d//Config.N_HEADS,Config.KV_MAX_SEQ)
-            pos=list(range(len(pt)))
-            x=[self.store.read_vector_fp32(self.tok_off+tid*d,d) for tid in pt]
-            for layer in self.layers: x,_=layer.forward(x,self.store,kv_cache=cache,positions=pos,training=False)
+    if bw is None: bw=Config.BEAM_WIDTH
+    EOS=self.tokenizer.st.get('</s>',3); d=self.d_model; nl=self.n_layers
+    pt=list(self.tokenizer.encode(prompt))
+    def make_initial():
+        cache=KVCache(nl,self.n_heads,d//self.n_heads,Config.KV_MAX_SEQ)
+        pos=list(range(len(pt)))
+        x=[self.store.read_vector_fp32(self.tok_off+tid*d,d) for tid in pt]
+        for layer in self.layers: x,_=layer.forward(x,self.store,kv_cache=cache,positions=pos,training=False)
+        final,_=self.ln.forward(x[-1],self.store)
+        ls=max(Config.LOGIT_SCALE_MIN,min(Config.LOGIT_SCALE_MAX,self.store.read_fp32(self.ls_off)))
+        logits=array.array('f',[ls*sum(self.store.read_fp32(self.tok_off+t*d+j)*final[j] for j in range(d)) for t in range(Config.VOCAB_SIZE)])
+        return logits,cache,len(pt)
+    first_logits,first_cache,first_pos=make_initial()
+    lt=array.array('f',[l/temp for l in first_logits]); probs=safe_softmax(lt)
+    topk=sorted(enumerate(probs),key=lambda x:x[1],reverse=True)[:bw]
+    beams=[{'tokens':pt+[tid],'log_prob':math.log(max(p,1e-9)),'cache':first_cache.clone(),'pos':first_pos,'finished':tid==EOS} for tid,p in topk]
+    for _ in range(max_new-1):
+        if all(b['finished'] for b in beams): break
+        candidates=[]
+        for b in beams:
+            if b['finished']: candidates.append(b); continue
+            last=b['tokens'][-1]; cp=b['pos']
+            x=[self.store.read_vector_fp32(self.tok_off+last*d,d)]
+            for layer in self.layers: x,_=layer.forward(x,self.store,kv_cache=b['cache'],positions=[cp],training=False)
             final,_=self.ln.forward(x[-1],self.store)
             ls=max(Config.LOGIT_SCALE_MIN,min(Config.LOGIT_SCALE_MAX,self.store.read_fp32(self.ls_off)))
             logits=array.array('f',[ls*sum(self.store.read_fp32(self.tok_off+t*d+j)*final[j] for j in range(d)) for t in range(Config.VOCAB_SIZE)])
-            return logits,cache,len(pt)
-        first_logits,first_cache,first_pos=make_initial()
-        lt=array.array('f',[l/temp for l in first_logits]); probs=safe_softmax(lt)
-        topk=sorted(enumerate(probs),key=lambda x:x[1],reverse=True)[:bw]
-        beams=[{'tokens':pt+[tid],'log_prob':math.log(max(p,1e-9)),'cache':first_cache.clone(),'pos':first_pos,'finished':tid==EOS} for tid,p in topk]
-        for _ in range(max_new-1):
-            if all(b['finished'] for b in beams): break
-            candidates=[]
-            for b in beams:
-                if b['finished']: candidates.append(b); continue
-                last=b['tokens'][-1]; cp=b['pos']
-                x=[self.store.read_vector_fp32(self.tok_off+last*d,d)]
-                for layer in self.layers: x,_=layer.forward(x,self.store,kv_cache=b['cache'],positions=[cp],training=False)
-                final,_=self.ln.forward(x[-1],self.store)
-                ls=max(Config.LOGIT_SCALE_MIN,min(Config.LOGIT_SCALE_MAX,self.store.read_fp32(self.ls_off)))
-                logits=array.array('f',[ls*sum(self.store.read_fp32(self.tok_off+t*d+j)*final[j] for j in range(d)) for t in range(Config.VOCAB_SIZE)])
-                lt=array.array('f',[l/temp for l in logits]); probs=safe_softmax(lt)
-                for tid,p in sorted(enumerate(probs),key=lambda x:x[1],reverse=True)[:bw]:
-                    nc=b['cache'].clone()
-                    candidates.append({'tokens':b['tokens']+[tid],'log_prob':b['log_prob']+math.log(max(p,1e-9)),'cache':nc,'pos':cp+1,'finished':tid==EOS})
-            beams=sorted(candidates,key=lambda x:x['log_prob'],reverse=True)[:bw]
-        return self.tokenizer.decode(beams[0]['tokens'][len(pt):])
-    
-    def generate(self,prompt,max_new=120,temp=0.75,top_k=50,top_p=0.90,use_beam=False):
-        if use_beam: return self.generate_beam(prompt,max_new,temp)
-        tokens=list(self.tokenizer.encode(prompt)); logits=self.prefill(tokens)
-        for _ in range(max_new):
-            recent=set(tokens[-32:]); logits=array.array('f',list(logits))
-            for t in recent: logits[t]=logits[t]/Config.REPETITION_PENALTY if logits[t]>0 else logits[t]*Config.REPETITION_PENALTY
-            logits=array.array('f',[l/temp for l in logits])
-            idx=sorted(enumerate(logits),key=lambda x:x[1],reverse=True)[:top_k]
-            if top_p<1.0 and idx:
-                p=safe_softmax(array.array('f',[t[1] for t in idx])); cum,cut=0.0,len(idx)
-                for i,pi in enumerate(p):
-                    cum+=pi
-                    if cum>=top_p: cut=i+1; break
-                idx=idx[:max(1,cut)]
-            p=safe_softmax(array.array('f',[t[1] for t in idx])); r,cum=random.random(),0.0; ch=idx[-1][0]
-            for i,(tid,_) in enumerate(idx):
-                cum+=p[i]
-                if r<=cum: ch=tid; break
-            tokens.append(ch)
-            if ch==self.tokenizer.st.get('</s>',3): break
-            logits=self.decode_step(ch)
-        return self.tokenizer.decode(tokens[len(self.tokenizer.encode(prompt)):])
+            lt=array.array('f',[l/temp for l in logits]); probs=safe_softmax(lt)
+            for tid,p in sorted(enumerate(probs),key=lambda x:x[1],reverse=True)[:bw]:
+                nc=b['cache'].clone()
+                candidates.append({'tokens':b['tokens']+[tid],'log_prob':b['log_prob']+math.log(max(p,1e-9)),'cache':nc,'pos':cp+1,'finished':tid==EOS})
+        beams=sorted(candidates,key=lambda x:x['log_prob'],reverse=True)[:bw]
+    return self.tokenizer.decode(beams[0]['tokens'][len(pt):])
     
     def save(self,path="qiccr_v7"):
         with open(path+"_fp32.bin",'wb') as f: f.write(self.store.fp32.tobytes())
