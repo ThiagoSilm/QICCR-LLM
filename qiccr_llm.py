@@ -451,16 +451,31 @@ class BPETokenizer:
 # ====================================================================
 class QICCRLLM:
     def __init__(self):
-        self.tokenizer=BPETokenizer()
-        d_final=Config.S2_D_MODEL; df_final=Config.S2_D_FF; nl_final=Config.S2_N_LAYERS
-        total=Config.VOCAB_SIZE*d_final + nl_final*(4*d_final*(d_final+1)+df_final*(d_final+1)+d_final*(df_final+1)+4*d_final) + 2*d_final + 1
-        self.store=WeightStore(total); self.grads=array.array('f',[0.0]*total); self.opt=AdamOptimizer(total)
-        self.alloc=WeightAllocator(total)
-        self.tok_off=self.alloc.alloc(Config.VOCAB_SIZE*d_final,"tok_embed")
-        self.stage=0
+        self.tokenizer = BPETokenizer()
+        # Cálculo do espaço total baseado no estágio FINAL para evitar realocação de memória física
+        d_final = Config.S2_D_MODEL
+        df_final = Config.S2_D_FF
+        nl_final = Config.S2_N_LAYERS
+        
+        # O total deve considerar o layout do estágio 2 desde o início
+        total = Config.VOCAB_SIZE * d_final + \
+                nl_final * (4 * d_final * (d_final + 1) + df_final * (d_final + 1) + d_final * (df_final + 1) + 4 * d_final) + \
+                2 * d_final + 1
+        
+        self.store = WeightStore(total)
+        self.grads = array.array('f', [0.0] * total)
+        self.opt = AdamOptimizer(total)
+        self.alloc = WeightAllocator(total)
+        
+        # O offset do token embedding é fixo no início
+        self.tok_off = self.alloc.alloc(Config.VOCAB_SIZE * d_final, "tok_embed")
+        self.stage = 1
         self._build_stage1()
-        self.kv=KVCache(Config.S1_N_LAYERS,Config.S1_N_HEADS,Config.S1_D_MODEL//Config.S1_N_HEADS,Config.KV_MAX_SEQ)
-        self.step=0; self.gpos=0
+        
+        # KV Cache precisa ser compatível com as dimensões atuais
+        self.kv = KVCache(Config.S1_N_LAYERS, Config.S1_N_HEADS, Config.S1_D_MODEL // Config.S1_N_HEADS, Config.KV_MAX_SEQ)
+        self.step = 0
+        self.gpos = 0
     
     def _build_stage1(self):
         d=Config.S1_D_MODEL; nh=Config.S1_N_HEADS; nl=Config.S1_N_LAYERS; df=Config.S1_D_FF
@@ -495,77 +510,82 @@ class QICCRLLM:
         return d**(-0.5)*min(step**(-0.5),step*warmup**(-1.5))
     
     def _interpolate_weights(self, old_off, new_off, old_in, old_out, new_in, new_out):
-        """Interpola pesos de old→new dimensionalidades (cópia com padding)."""
-        for i in range(min(old_out,new_out)):
-            old_base=old_off+i*(old_in+1); new_base=new_off+i*(new_in+1)
-            for j in range(min(old_in,new_in)):
-                self.store.write_fp32(new_base+j,self.store.read_fp32(old_base+j))
-            self.store.write_fp32(new_base+new_in,self.store.read_fp32(old_base+old_in))
-    
+        """
+        Copia pesos de uma matriz antiga para uma nova, preservando o aprendizado.
+        Lida com o bias (última coluna) corretamente.
+        """
+        for i in range(min(old_out, new_out)):
+            # Offset de matrizes lineares (weights + bias)
+            old_base = old_off + i * (old_in + 1)
+            new_base = new_off + i * (new_in + 1)
+            
+            # Copia pesos das colunas
+            for j in range(min(old_in, new_in)):
+                self.store.write_fp32(new_base + j, self.store.read_fp32(old_base + j))
+            
+            # Copia o BIAS (que fica no final da linha)
+            self.store.write_fp32(new_base + new_in, self.store.read_fp32(old_base + old_in))
+         
     def expand_to_stage2(self):
-        """Expande modelo do estágio 1 → estágio 2."""
-        print("🚀 Expandindo para Estágio 2...")
-        old_d=Config.S1_D_MODEL; new_d=Config.S2_D_MODEL
-        old_nh=Config.S1_N_HEADS; new_nh=Config.S2_N_HEADS
-        old_df=Config.S1_D_FF; new_df=Config.S2_D_FF
+        if self.stage >= 2: return
+        print("🚀 Expandindo para Estágio 2 (Growth: Width & Depth)...")
         
-        # Salva offsets antigos
-        old_layers=self.layers[:]
-        old_ln_off=self.ln_off; old_ls_off=self.ls_off
+        old_d, new_d = Config.S1_D_MODEL, Config.S2_D_MODEL
+        old_df, new_df = Config.S1_D_FF, Config.S2_D_FF
         
-        # Reseta alocador para o estágio 2
-        self.alloc=WeightAllocator(self.store.total_params)
-        self.tok_off=self.alloc.alloc(Config.VOCAB_SIZE*new_d,"tok_embed")
+        # 1. Backup de referências
+        old_tok_off = self.tok_off
+        old_layers = self.layers[:]
+        old_ln_off = self.ln_off
+
+        # 2. Re-alocação lógica (O WeightStore continua o mesmo)
+        self.alloc = WeightAllocator(self.store.total_params)
+        self.tok_off = self.alloc.alloc(Config.VOCAB_SIZE * new_d, "tok_embed")
         
-        # Interpola embedding
-        self._interpolate_weights(old_layers[0].q_proj.offset,self.tok_off,
-                                  Config.VOCAB_SIZE,old_d,Config.VOCAB_SIZE,new_d)
-        
-        # Cria novas camadas
-        self.layers=[]
+        # 3. Interpolação correta do Embedding
+        # Diferente de matrizes lineares, o embedding é [Vocab x Dim] sem bias por linha
+        for i in range(Config.VOCAB_SIZE):
+            for j in range(min(old_d, new_d)):
+                val = self.store.read_fp32(old_tok_off + i * old_d + j)
+                self.store.write_fp32(self.tok_off + i * new_d + j, val)
+
+        # 4. Construção das novas camadas
+        self.layers = []
         for i in range(Config.S2_N_LAYERS):
-            blk=TransformerBlock(i,self.alloc,self.store,new_d,new_nh,new_df,True)
+            blk = TransformerBlock(i, self.alloc, self.store, new_d, Config.S2_N_HEADS, new_df, True)
             self.layers.append(blk)
+
+        # 5. Width Growth (Camada 0 antiga -> Camada 0 nova)
+        o_blk, n_blk = old_layers[0], self.layers[0]
+        projs = [(o_blk.q_proj, n_blk.q_proj), (o_blk.k_proj, n_blk.k_proj), 
+                 (o_blk.v_proj, n_blk.v_proj), (o_blk.o_proj, n_blk.o_proj),
+                 (o_blk.ff_up, n_blk.ff_up), (o_blk.ff_down, n_blk.ff_down)]
         
-        # Interpola pesos da camada 0 antiga → camada 0 nova
-        old_blk=old_layers[0]; new_blk=self.layers[0]
-        for old_proj,new_proj in [(old_blk.q_proj,new_blk.q_proj),(old_blk.k_proj,new_blk.k_proj),
-                                   (old_blk.v_proj,new_blk.v_proj),(old_blk.o_proj,new_blk.o_proj),
-                                   (old_blk.ff_up,new_blk.ff_up),(old_blk.ff_down,new_blk.ff_down)]:
-            self._interpolate_weights(old_proj.offset,new_proj.offset,
-                                      old_proj.in_f,old_proj.out_f,new_proj.in_f,new_proj.out_f)
-        for old_ln,new_ln in [(old_blk.ln1,new_blk.ln1),(old_blk.ln2,new_blk.ln2)]:
-            for i in range(min(old_ln.dim,new_ln.dim)):
-                self.store.write_fp32(new_ln.offset+i,self.store.read_fp32(old_ln.offset+i))
-                self.store.write_fp32(new_ln.offset+new_ln.dim+i,self.store.read_fp32(old_ln.offset+old_ln.dim+i))
+        for op, np in projs:
+            self._interpolate_weights(op.offset, np.offset, op.in_f, op.out_f, np.in_f, np.out_f)
+            
+        # 6. Depth Stacking (Se subimos de 1 para 2 camadas, a L1 recebe pesos da L0 expandida)
+        if len(self.layers) > 1:
+            l0, l1 = self.layers[0], self.layers[1]
+            # Copiar bytes brutos da L0 expandida para a L1
+            for p0, p1 in [(l0.q_proj, l1.q_proj), (l0.k_proj, l1.k_proj), (l0.v_proj, l1.v_proj),
+                           (l0.o_proj, l1.o_proj), (l0.ff_up, l1.ff_up), (l0.ff_down, l1.ff_down)]:
+                for k in range(p0.W_size):
+                    self.store.write_fp32(p1.offset + k, self.store.read_fp32(p0.offset + k))
+
+        # 7. Finalização
+        self.ln_off = self.alloc.alloc(2 * new_d, "ln_final")
+        self.ln = LayerNorm(new_d, self.ln_off, "ln_final", True)
+        self.ls_off = self.alloc.alloc(1, "logit_scale")
+        self.store.write_fp32(self.ls_off, 1.0 / math.sqrt(new_d))
         
-        # Depth-stacking: camada 1 nova = cópia da camada 0 nova
-        if Config.S2_N_LAYERS>1:
-            blk0=self.layers[0]; blk1=self.layers[1]
-            for p0,p1 in [(blk0.q_proj,blk1.q_proj),(blk0.k_proj,blk1.k_proj),(blk0.v_proj,blk1.v_proj),
-                           (blk0.o_proj,blk1.o_proj),(blk0.ff_up,blk1.ff_up),(blk0.ff_down,blk1.ff_down)]:
-                for i in range(p0.W_size): self.store.write_fp32(p1.offset+i,self.store.read_fp32(p0.offset+i))
-            for ln0,ln1 in [(blk0.ln1,blk1.ln1),(blk0.ln2,blk1.ln2)]:
-                for i in range(2*new_d): self.store.write_fp32(ln1.offset+i,self.store.read_fp32(ln0.offset+i))
+        # Reset do Cache para novas dimensões
+        self.d_model = new_d
+        self.kv = KVCache(Config.S2_N_LAYERS, Config.S2_N_HEADS, new_d // Config.S2_N_HEADS, Config.KV_MAX_SEQ)
+        self.stage = 2
         
-        self.ln_off=self.alloc.alloc(2*new_d,"ln_final"); self.ln=LayerNorm(new_d,self.ln_off,"ln_final",True)
-        for i in range(min(old_d,new_d)):
-            self.store.write_fp32(self.ln_off+i,self.store.read_fp32(old_ln_off+i))
-            self.store.write_fp32(self.ln_off+new_d+i,self.store.read_fp32(old_ln_off+old_d+i))
-        
-        self.ls_off=self.alloc.alloc(1,"logit_scale"); self.store.write_fp32(self.ls_off,1.0/math.sqrt(new_d))
-        
-        self.d_model=new_d; self.n_heads=new_nh; self.n_layers=Config.S2_N_LAYERS; self.d_ff=new_df
-        self.kv=KVCache(Config.S2_N_LAYERS,new_nh,new_d//new_nh,Config.KV_MAX_SEQ)
-        
-        # Fresh optimizer states para novas camadas
-        new_offsets=[]
-        for blk in self.layers:
-            for proj in [blk.q_proj,blk.k_proj,blk.v_proj,blk.o_proj,blk.ff_up,blk.ff_down]:
-                new_offsets.append((proj.offset,proj.W_size))
-            new_offsets.append((blk.ln1.offset,2*new_d)); new_offsets.append((blk.ln2.offset,2*new_d))
-        self.opt.reset_moments(new_offsets)
-        self.stage=2
+        # Resetar momentos do Adam apenas para os parâmetros que mudaram drasticamente
+        self.opt = AdamOptimizer(self.store.total_params) 
         print("✅ Expansão concluída.")
     
     def _forward(self,tokens,use_kv=False,positions=None,training=False):
