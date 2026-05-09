@@ -1,337 +1,313 @@
-# QICCR-LLM v5.4
+# QICCR-LLM
 
-> Transformer de linguagem implementado do zero em Python puro — sem PyTorch, sem NumPy, sem frameworks.
+A from-scratch transformer language model in pure Python. No PyTorch, no NumPy, no frameworks — just `array.array('f')` and explicit loops. Educational, inspectable, and mathematically correct.
 
----
+## Overview
 
-## O que é isso
+QICCR is a complete decoder-only transformer with manual forward/backward passes, AdamW optimizer, KV cache, rotary embeddings, BPE tokenizer, and beam search. It doesn't compete with production models in speed, but every operation is transparent and step-debuggable.
 
-QICCR é um modelo de linguagem transformer completo escrito inteiramente com a biblioteca padrão do Python. Cada operação — forward pass, backward pass, otimizador Adam, KV cache, embeddings rotacionais — é implementada manualmente com `array.array('f')` e loops explícitos.
+**At a glance:**
 
-É um sistema educacional e experimental. Não compete com modelos de produção em velocidade, mas é matematicamente correto e totalmente inspecionável.
-
-**Arquitetura resumida:**
-
-| Parâmetro | Valor |
+| | |
 |---|---|
-| Camadas | 2 |
-| Cabeças de atenção | 4 |
-| Dimensão do modelo | 128 |
-| Dimensão FFN | 256 |
-| Tamanho do vocab | 8192 |
-| Contexto máximo (treino) | 64 tokens |
-| KV cache máximo | 128 tokens |
+| Layers | 2 |
+| Attention heads | 4 |
+| Model dimension | 128 |
+| FFN dimension | 256 |
+| Vocabulary | 8192 (BPE) |
+| Train context | 64 tokens |
+| KV cache capacity | 128 tokens |
+| Parameters | ~1.3M |
 
----
+## Requirements
 
-## Requisitos
-
-- Python 3.8 ou superior
-- Nenhuma dependência externa
+Python 3.8+. Nothing else.
 
 ```bash
-python --version  # 3.8+
+python --version  # → 3.8+
 ```
 
----
+## Quick start
 
-## Instalação
+### Train
+
+Create a `treino.txt` file with your training text, then:
 
 ```bash
-git clone <repo>
-cd qiccr
-# pronto — não há pip install
+python qiccr_llm.py --train        # 5 epochs (default)
+python qiccr_llm.py --train 10     # 10 epochs
 ```
 
----
+The model saves checkpoints automatically:
+- `qiccr_v61_best_*` — best loss so far
+- `qiccr_v61_latest_*` — most recent epoch
 
-## Uso rápido
-
-### Treinar o modelo
-
-Crie um arquivo `treino.txt` com o texto de treinamento (quanto maior e mais rico, melhor):
+### Chat
 
 ```bash
-python qiccr_v54.py --train
+python qiccr_llm.py
 ```
 
-Com número de épocas personalizado:
-
-```bash
-python qiccr_v54.py --train 10
-```
-
-O treinamento salva checkpoints automaticamente:
-- `qiccr_v5_best_*` — melhor loss vista até agora
-- `qiccr_v5_latest_*` — checkpoint da última época
-
-### Conversar com o modelo
-
-```bash
-python qiccr_v54.py
-```
-
-O modelo carrega o melhor checkpoint disponível e abre o chat interativo:
+The model loads the best available checkpoint and opens an interactive session:
 
 ```
-🚀 QICCR v5.4 | 'sair' | 'reset'
+🚀 QICCR-LLM v6.1 | Comandos: 'sair' | 'reset' | 'beam'
 
-🧑 Você: olá, como vai?
-🐶 Qiccr: ...
+🧑 Você: What is machine learning?
+🐶 Qiccr: Machine learning is a field of artificial intelligence...
+
+🧑 Você: beam
+✅ Beam search: ON
+
+🧑 Você: reset
+✅ Cache limpo.
 ```
 
-**Comandos especiais no chat:**
+**Chat commands:**
 
-| Comando | Ação |
+| Command | Effect |
 |---|---|
-| `sair` / `exit` / `quit` | Encerra o programa |
-| `reset` | Limpa o KV cache e reinicia o contexto |
+| `sair` / `exit` / `quit` | Exit |
+| `reset` | Clear KV cache, restart context |
+| `beam` | Toggle beam search on/off |
 
----
+## Configuration
 
-## Configuração
-
-Todos os hiperparâmetros ficam na classe `Config` no topo do arquivo. Edite diretamente antes de treinar:
+All hyperparameters live in the `Config` class. Edit directly before training:
 
 ```python
 class Config:
-    VOCAB_SIZE = 8192        # tamanho do vocabulário BPE
-    D_MODEL = 128            # dimensão dos embeddings
-    N_HEADS = 4              # cabeças de atenção multi-head
-    N_LAYERS = 2             # número de blocos transformer
-    D_FF = 256               # dimensão interna do FFN
-    MAX_SEQ = 64             # janela de contexto no treino
-    KV_MAX_SEQ = 128         # slots máximos no KV cache
-    LEARNING_RATE = 3e-4     # taxa de aprendizado AdamW
-    WEIGHT_DECAY = 0.01      # regularização L2
-    GRAD_CLIP = 1.0          # clipping de gradiente
-    FFN_DROPOUT = 0.1        # dropout no FFN (apenas treino)
-    TEMPERATURE = 0.75       # temperatura de amostragem
-    TOP_K = 50               # top-k na geração
-    TOP_P = 0.90             # top-p (nucleus sampling)
-    REPETITION_PENALTY = 1.1 # penalidade por repetição
-    MAX_TRAIN_STEPS = 8000   # passos por época
-    TRAIN_WINDOW_SIZE = 32   # janela deslizante de treino
+    # Model architecture
+    VOCAB_SIZE       = 8192
+    D_MODEL          = 128
+    N_HEADS          = 4
+    N_LAYERS         = 2
+    D_FF             = 256
+    MAX_SEQ          = 64
+    KV_MAX_SEQ       = 128
+
+    # Training
+    MAX_TRAIN_STEPS  = 8000
+    TRAIN_WINDOW_MIN = 16
+    TRAIN_WINDOW_MAX = 48
+    BATCH_SIZE       = 4
+    WEIGHT_DECAY     = 0.01
+    GRAD_CLIP        = 1.0
+    FFN_DROPOUT      = 0.1
+    LABEL_SMOOTHING  = 0.1
+    NOAM_WARMUP      = 4000
+
+    # AdamW
+    ADAM_BETA1       = 0.9
+    ADAM_BETA2       = 0.999
+    ADAM_EPS         = 1e-8
+
+    # Generation
+    TEMPERATURE        = 0.75
+    TOP_K              = 50
+    TOP_P              = 0.90
+    REPETITION_PENALTY = 1.1
+    BEAM_WIDTH         = 3
 ```
 
-**Dicas de configuração:**
+**Tuning tips:**
+- Short texts (~10k chars): reduce `MAX_TRAIN_STEPS` to 2000–3000
+- More capacity: increase `D_MODEL` to 256, `N_LAYERS` to 4 (training ~4× slower)
+- More creative: `TEMPERATURE = 0.9`, `TOP_P = 0.95`
+- More deterministic: `TEMPERATURE = 0.5`, `TOP_K = 20`
 
-- Para textos curtos (~10k chars): reduza `MAX_TRAIN_STEPS` para 2000–3000
-- Para aumentar capacidade: aumente `D_MODEL` para 256 e `N_LAYERS` para 4 (treino ~4x mais lento)
-- Para geração mais criativa: `TEMPERATURE = 0.9`, `TOP_P = 0.95`
-- Para geração mais determinística: `TEMPERATURE = 0.5`, `TOP_K = 20`
-
----
-
-## Uso programático
+## Programmatic use
 
 ```python
-from qiccr_v54 import QICCRLLM, Config
+from qiccr_llm import QICCRLLM, Config, train_model
 import random
 
 random.seed(42)
-
-# Instanciar
 model = QICCRLLM()
 
-# Treinar
-from qiccr_v54 import train_model
-train_model(model, filepath="meu_texto.txt", epochs=3)
+# Train
+train_model(model, file="my_text.txt", epochs=3)
 
-# Gerar texto
-resposta = model.generate(
-    "Era uma vez",
+# Generate
+response = model.generate(
+    "Once upon a time",
     max_new=100,
-    temperature=0.8,
+    temp=0.8,
     top_k=50,
     top_p=0.92
 )
-print(resposta)
+print(response)
 
-# Salvar e carregar
-model.save("meu_modelo")
-model.load("meu_modelo")
+# Save / load
+model.save("my_model")
+model.load("my_model")
 ```
 
-### Tokenizar manualmente
+### Tokenizer
 
 ```python
-tokens = model.tokenizer.encode("olá mundo")
-print(tokens)  # tuple de inteiros
+# Train BPE on custom texts
+texts = ["first corpus...", "second corpus..."]
+model.tokenizer.train(texts, num_merges=3000)
 
-texto = model.tokenizer.decode(list(tokens))
-print(texto)   # "olá mundo"
+# Encode / decode
+tokens = model.tokenizer.encode("hello world")  # → tuple of ints
+text   = model.tokenizer.decode(tokens)         # → "hello world"
 ```
 
-### Treinar o tokenizador separadamente
-
-O tokenizador BPE pode ser treinado em qualquer lista de textos:
+### Multi-turn context
 
 ```python
-textos = ["primeiro texto...", "segundo texto..."]
-model.tokenizer.train(textos, num_merges=3000)
+# Full control over KV cache
+logits = model.prefill(prompt_tokens)  # populate cache
+for _ in range(max_new):
+    logits = model.decode_step(token)  # one token at a time
+    # ... sample next token
+
+model.kv.clear()  # reset context
 ```
 
----
+## How it works
 
-## Como funciona
-
-### Fluxo geral
+### Data flow
 
 ```
-Texto → BPE Tokenizer → Token IDs
-Token IDs → Embedding → Vetores D_MODEL
-Vetores → [TransformerBlock × N_LAYERS] → Representações
-Representação final → LayerNorm → Logits
-Logits → Softmax → Probabilidades → Token gerado
+Text → BPE Tokenizer → Token IDs
+Token IDs → Embedding lookup → D_MODEL vectors
+Vectors → [TransformerBlock × N_LAYERS] → Representations
+Final representation → LayerNorm → Logit projection
+Logits → Softmax → Token probabilities → Sampled token
 ```
 
-### 1. Tokenizador BPE
+### 1. BPE tokenizer
 
-O tokenizador usa Byte Pair Encoding com um heap de prioridade para aplicar merges em O(n log n). Parte de um vocabulário base de todos os 256 bytes, aprende pares frequentes no texto de treinamento, e constrói tokens progressivamente maiores.
+Starts from all 256 bytes as base vocabulary. Learns frequent adjacent pairs from training text using a min-heap for O(n log n) merge application. Special tokens: `<pad>` (0), `<unk>` (1), `<s>` (2), `</s>` (3).
 
-Tokens especiais:
-- `<pad>` (0) — preenchimento
-- `<unk>` (1) — token desconhecido
-- `<s>` (2) — início de sequência
-- `</s>` (3) — fim de sequência
+### 2. Flat weight storage
 
-### 2. Armazenamento de pesos
-
-Todos os parâmetros vivem em um único `array.array('f')` flat. Cada camada recebe um offset calculado pelo `WeightAllocator` na inicialização. Isso simula o comportamento de um tensor store sem usar NumPy.
+All parameters live in a single `array.array('f')`. A `WeightAllocator` assigns sequential offsets at initialization — each layer knows where its weights begin. This mimics a tensor store without NumPy.
 
 ```
 [tok_embed | q0 k0 v0 o0 up0 down0 ln10 ln20 | q1 k1 ... | ln_final | logit_scale]
- ←── VOCAB*D ──→ ←──────────── LAYER 0 ────────────────→ ←─ LAYER 1 ─→
+ ←── VOCAB*D ──→ ←────────── LAYER 0 ────────────→ ←─ LAYER 1 ─→ ←2D→ ←1→
 ```
 
-### 3. Atenção multi-head com RoPE
+### 3. Multi-head attention with RoPE
 
-Cada token projeta Q, K, V. As queries e keys recebem embeddings rotacionais posicionais (RoPE) que codificam posição via rotações no espaço complexo:
-
-```
-q_rotated[2i]   = q[2i]   * cos(θ_i) - q[2i+1] * sin(θ_i)
-q_rotated[2i+1] = q[2i]   * sin(θ_i) + q[2i+1] * cos(θ_i)
-θ_i = pos / 10000^(2i/d_head)
-```
-
-O RoPE permite que o modelo aprenda relações relativas de posição, não absolutas.
-
-### 4. KV Cache
-
-Durante a inferência, as chaves e valores já computados são armazenados e reutilizados. Cada entrada tem:
-- `slot_id` — identificador global único
-- `timestamp` — posição original na sequência
-- `K_base` — chave **sem** rotação aplicada (rotacionada no momento do uso)
-
-Isso garante que a rotação RoPE use sempre o timestamp correto, independente da ordem de armazenamento no cache.
-
-### 5. Backward pass manual
-
-O gradiente flui explicitamente de volta por cada operação:
+Each token projects Q, K, V. Queries and keys receive **rotary positional embeddings** — position is encoded by rotating pairs of dimensions:
 
 ```
-∂L/∂logits → ∂L/∂final → ∂L/∂LayerNorm → ∂L/∂TransformerBlocks → ∂L/∂embeddings
+q_rot[2i]   = q[2i]·cos(θ) - q[2i+1]·sin(θ)
+q_rot[2i+1] = q[2i]·sin(θ) + q[2i+1]·cos(θ)
+θ = pos / 10000^(2i/d_head)
 ```
 
-Dentro de cada bloco, o backward percorre em ordem inversa:
-1. FFN down → GELU' → FFN up
+This gives the model **relative** position awareness, not absolute.
+
+### 4. KV cache
+
+During inference, computed keys and values are stored and reused. Each entry carries a timestamp (original position). Base keys are stored **unrotated** — rotation is applied on retrieval using the correct timestamp, regardless of storage order.
+
+### 5. Manual backward pass
+
+Gradients flow explicitly through every operation in reverse:
+
+```
+∂L/∂logits → ∂L/∂final → ∂L/∂LayerNorm → ∂L/∂blocks → ∂L/∂embeddings
+```
+
+Inside each transformer block:
+1. FFN down → GELU derivative → FFN up
 2. LayerNorm 2 + residual
 3. Output projection
-4. Atenção: ∂L/∂probs → softmax backward → ∂L/∂scores → ∂L/∂Q, ∂K, ∂V
-5. Inverse RoPE nos gradientes de Q e K
-6. Projeções Q, K, V
+4. Attention: ∂L/∂probs → softmax backward → ∂L/∂scores → ∂L/∂Q,∂K,∂V
+5. Inverse RoPE on Q and K gradients
+6. Q, K, V projections
 7. LayerNorm 1 + residual
 
-### 6. Otimizador AdamW
+### 6. AdamW optimizer
 
-Implementação completa com:
-- Momentos de primeira e segunda ordem (m, v)
-- Correção de bias: `m̂ = m / (1 - β₁ᵗ)`
-- Weight decay desacoplado (AdamW, não Adam)
-- Gradient clipping global por norma L2
+Full implementation with:
+- First/second moment estimates (m, v)
+- Bias correction: `m̂ = m / (1 - β₁ᵗ)`
+- Decoupled weight decay (AdamW, not Adam)
+- Global L2 gradient clipping
 
-### 7. Geração de texto
+### 7. Text generation
 
-A geração usa o pipeline prefill + decode:
+Two strategies:
 
-1. **Prefill**: processa o prompt inteiro, popula o KV cache
-2. **Decode**: gera um token por vez, cada passo usa o KV cache acumulado
+**Sampling** (default): prefill prompt → decode token-by-token with top-K, top-P, and repetition penalty.
 
-Amostragem com:
-- Top-K: mantém apenas os K tokens mais prováveis
-- Top-P (nucleus): mantém os tokens que somam probabilidade ≥ P
-- Penalidade de repetição: divide logits de tokens recentes por 1.1
+**Beam search** (`beam` command): maintains B parallel hypotheses, expands each with top-B candidates per step, prunes to best B by cumulative log-probability. Uses cache cloning for efficient branching.
 
----
+## Checkpoint format
 
-## Checkpoints
+Three files per checkpoint:
 
-Três arquivos são salvos por checkpoint:
-
-| Arquivo | Conteúdo |
+| File | Content |
 |---|---|
-| `*_fp32.bin` | Pesos do modelo em float32 raw |
-| `*_optim.json.gz` | Estado do Adam (m, v, t) comprimido |
-| `*_meta.json.gz` | Vocabulário BPE, merges, step_count |
-
-Para carregar manualmente:
+| `*_fp32.bin` | Model weights (raw float32) |
+| `*_optim.json.gz` | Adam state (m, v, step count) |
+| `*_meta.json.gz` | BPE vocabulary, merges, step count |
 
 ```python
 model = QICCRLLM()
-model.load("qiccr_v5_best")   # sem extensão
+model.load("qiccr_v61_best")   # no extension needed
 ```
 
----
+## Performance expectations
 
-## Expectativas de desempenho
+This is **pure Python** — no vectorization, no GPU. On a modern CPU:
 
-Este modelo é **Python puro** — sem vetorização, sem GPU. Tempos aproximados em CPU moderna:
-
-| Operação | Tempo estimado |
+| Operation | Approximate time |
 |---|---|
-| 1 passo de treino (janela 32) | 5–15 segundos |
-| Gerar 1 token | 2–5 segundos |
-| Epoch de 500 passos | ~1–2 horas |
+| 1 training step (window ~32) | 5–15s |
+| Generate 1 token | 2–5s |
+| 500-step epoch | ~1–2 hours |
 
-Para uso prático de treinamento, recomenda-se textos de até ~50k caracteres e 1–3 épocas.
+The bottleneck is the lm_head vocabulary projection: `VOCAB_SIZE × D_MODEL` operations in Python per forward pass (~1M operations). Convergence happens — loss decreases — but iteration speed limits extensive experimentation.
 
-A convergência é real — a loss decresce — mas o tempo por passo limita experimentos extensos.
-
----
-
-## Arquitetura de arquivos
+## Architecture
 
 ```
-qiccr_v54.py           # código principal — tudo em um arquivo
-treino.txt             # seu corpus de treinamento
-qiccr_v5_best_fp32.bin        # pesos do melhor checkpoint
-qiccr_v5_best_optim.json.gz   # estado do otimizador
-qiccr_v5_best_meta.json.gz    # vocab e metadados
-qiccr_v5_latest_*             # checkpoint da última época
+QICCR-LLM v6.1
+┌─────────────────────────────────┐
+│      Token Embedding            │
+│      (Vocab → 128)              │
+└────────────┬────────────────────┘
+             │
+   ┌─────────▼─────────┐
+   │ Transformer Block  │  ×2
+   │                    │
+   │  LayerNorm →       │
+   │  Multi-Head Attn   │
+   │  (4 heads + RoPE)  │
+   │  + Residual →      │
+   │  LayerNorm →       │
+   │  FFN (GELU, 256)   │
+   │  + Residual        │
+   └─────────┬─────────┘
+             │
+   ┌─────────▼─────────┐
+   │   Final LayerNorm  │
+   │   Logit Projection │
+   │   Softmax / Beam   │
+   └────────────────────┘
 ```
 
----
+## Limitations
 
-## Limitações conhecidas
+- **Performance**: Python-loop attention and vocabulary projection are the main bottlenecks. No GPU path exists in this implementation.
+- **KV cache at training**: Only used during inference. Training always computes full attention over the window.
+- **Model capacity**: ~1.3M parameters at default settings — sufficient for local pattern memorization in short texts, limited for generalization.
 
-**Performance:** O gargalo principal é o produto interno do lm_head: VOCAB_SIZE × D_MODEL operações em Python puro por forward pass (~1M operações). Não há caminho para GPU nesta implementação.
+## Known fixes in v6.1
 
-**KV cache no treino:** O KV cache é usado apenas na inferência. O treino sempre computa atenção completa na janela.
+- **KV cache clone**: Added missing `d_head` parameter to `KVCache.__init__` inside `clone()`, preventing silent shape corruption during beam search.
+- **Backward pass indices**: Causal mask in backward now correctly uses `ts <= pos_local[i]` (relative positions), matching the forward pass constraint.
+- **Removed unused defaultdict**: Cleaned up an import that was never used.
 
-**Tamanho do modelo:** Com os hiperparâmetros padrão, o modelo tem ~1.3M parâmetros — suficiente para memorizar padrões locais em textos curtos, mas limitado para generalização.
+## License
 
----
-
-## Histórico de versões
-
-| Versão | Mudanças principais |
-|---|---|
-| v5.4 | Fix `inverse_rotate` com timestamp correto; `encode.cache_clear()` pós-treino BPE; `random.seed(42)` |
-| v5.3 | KV cache com `slot_ids` globais; `safe_softmax` com fallback uniforme; `logit_scale` com clamp |
-
----
-
-## Licença
-
-Uso livre para fins educacionais e de pesquisa.
+Free for educational and research use.
